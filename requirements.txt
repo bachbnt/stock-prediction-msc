@@ -1,0 +1,15 @@
+# Stock Prediction — MSc Thesis
+# Python 3.10+
+#
+# Cài đặt:
+#   pip install -r requirements.txt
+#
+# Apple Silicon (M1/M2/M3) — thêm GPU acceleration:
+#   pip install tensorflow-metal
+
+tensorflow>=2.13.0
+scikit-learn>=1.3.0
+statsmodels>=0.14.0
+pandas>=2.0.0
+numpy>=1.24.0
+matplotlib>=3.7.0
