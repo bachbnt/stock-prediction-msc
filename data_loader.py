@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 from sklearn.preprocessing import MinMaxScaler
 
-from config import FEATURE_COLS, TARGET_COL, CLOSE_IDX, WINDOW_SIZE, DATE_MILESTONE
+from config import FEATURE_COLS, TARGET_COL, CLOSE_IDX, WINDOW_SIZE, DATE_MILESTONE, N_PREDICT_STEPS
 
 
 # ── Cột CSV gốc (uppercase) → lowercase chuẩn ────────────────────────────────
@@ -124,21 +124,41 @@ def update_data(symbol: str, data_dir: str = 'data') -> pd.DataFrame:
 # ═══════════════════════════════════════════════════════════════════════════════
 # 3. PREPARE — Tạo sequences cho model
 # ═══════════════════════════════════════════════════════════════════════════════
-def _make_sequences(data: np.ndarray, window: int, target_idx: int):
+def _make_sequences(data: np.ndarray, window: int, target_idx: int,
+                    n_steps: int = 1):
+    """
+    Tạo X/y sequences.
+    - n_steps=1  → y là scalar (single-step)
+    - n_steps>1  → y là vector [t+1, t+2, ..., t+n_steps] (multi-step)
+    """
     X, y = [], []
-    for i in range(window, len(data)):
+    max_i = len(data) - n_steps
+    for i in range(window, max_i):
         X.append(data[i - window:i])
-        y.append(data[i, target_idx])
+        if n_steps == 1:
+            y.append(data[i, target_idx])
+        else:
+            y.append(data[i:i + n_steps, target_idx])
     return np.array(X), np.array(y)
 
 
 def prepare_data(df: pd.DataFrame,
                  date_milestone: str = DATE_MILESTONE,
-                 window: int = WINDOW_SIZE):
+                 window: int = WINDOW_SIZE,
+                 n_steps: int = None):
     """
     Split train/test, scale (fit chỉ trên train), tạo sequences.
-    Trả về: X_train, y_train, X_test, y_test, scaler, df_train, df_test
+
+    Args:
+        n_steps: số bước dự đoán (None → dùng N_PREDICT_STEPS từ config).
+
+    Returns:
+        X_train, y_train, X_test, y_test, scaler, df_train, df_test
+        - y shape: (N,) nếu n_steps=1, (N, n_steps) nếu n_steps>1
     """
+    if n_steps is None:
+        n_steps = N_PREDICT_STEPS
+
     df_train = df[df['date'] < date_milestone].copy()
     df_test  = df[df['date'] >= date_milestone].copy()
 
@@ -154,14 +174,27 @@ def prepare_data(df: pd.DataFrame,
     train_sc = combined_sc[:n_train]
     test_sc  = combined_sc[n_train - window:]
 
-    X_train, y_train = _make_sequences(train_sc, window, CLOSE_IDX)
-    X_test,  y_test  = _make_sequences(test_sc,  window, CLOSE_IDX)
+    X_train, y_train = _make_sequences(train_sc, window, CLOSE_IDX, n_steps)
+    X_test,  y_test  = _make_sequences(test_sc,  window, CLOSE_IDX, n_steps)
 
     return X_train, y_train, X_test, y_test, scaler, df_train, df_test
 
 
 def inverse_close(scaled: np.ndarray, scaler: MinMaxScaler) -> np.ndarray:
-    """Inverse transform chỉ cho cột close (index 0)."""
-    dummy = np.zeros((len(scaled), len(FEATURE_COLS)))
-    dummy[:, CLOSE_IDX] = scaled.flatten()
-    return scaler.inverse_transform(dummy)[:, CLOSE_IDX]
+    """
+    Inverse transform cho cột close (index CLOSE_IDX).
+    Hỗ trợ cả 1D (single-step) và 2D (multi-step, shape N×n_steps).
+    """
+    scaled_flat = np.array(scaled)
+    original_shape = scaled_flat.shape
+
+    # Flatten về 1D
+    flat = scaled_flat.flatten()
+    dummy = np.zeros((len(flat), len(FEATURE_COLS)))
+    dummy[:, CLOSE_IDX] = flat
+    result = scaler.inverse_transform(dummy)[:, CLOSE_IDX]
+
+    # Reshape lại nếu multi-step
+    if len(original_shape) > 1:
+        return result.reshape(original_shape)
+    return result

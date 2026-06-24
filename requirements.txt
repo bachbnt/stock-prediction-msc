@@ -4,12 +4,32 @@
 # Cài đặt:
 #   pip install -r requirements.txt
 #
-# Apple Silicon (M1/M2/M3) — thêm GPU acceleration:
+# Apple Silicon (M1/M2/M3) — thêm GPU acceleration sau khi cài tensorflow:
 #   pip install tensorflow-metal
 
+# ── Core ML ───────────────────────────────────────────────────────────────────
 tensorflow>=2.13.0
 scikit-learn>=1.3.0
 statsmodels>=0.14.0
+
+# ── Data ──────────────────────────────────────────────────────────────────────
 pandas>=2.0.0
 numpy>=1.24.0
+vnstock>=4.0.0          # cập nhật dữ liệu thị trường Việt Nam
+
+# ── Visualization ─────────────────────────────────────────────────────────────
 matplotlib>=3.7.0
+
+# ── Portfolio Optimization ────────────────────────────────────────────────────
+scipy>=1.11.0            # Markowitz MVO
+
+# ── Sentiment Analysis — News Crawler ────────────────────────────────────────
+pygooglenews>=0.1.2      # Google News RSS
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+
+# ── Sentiment Analysis — PhoBERT (optional, cần GPU/MPS để fine-tune nhanh) ──
+# Bỏ comment 3 dòng dưới nếu muốn dùng PhoBERT:
+# transformers>=4.35.0
+# torch>=2.0.0
+# sentencepiece>=0.1.99

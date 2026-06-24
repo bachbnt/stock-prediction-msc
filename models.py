@@ -7,7 +7,7 @@ from keras.layers import (LSTM, Bidirectional, Conv1D, MaxPooling1D,
 from keras.callbacks import EarlyStopping, ReduceLROnPlateau
 from keras.regularizers import l2 as l2_reg
 
-from config import MAX_EPOCHS, PATIENCE_ES, PATIENCE_LR
+from config import MAX_EPOCHS, PATIENCE_ES, PATIENCE_LR, N_PREDICT_STEPS
 
 
 def _callbacks():
@@ -19,8 +19,12 @@ def _callbacks():
     ]
 
 
-def build_lstm(input_shape, units=64, dropout=0.2, l2=1e-4) -> Sequential:
-    """2 lớp LSTM + BatchNorm + L2 regularization."""
+def build_lstm(input_shape, units=64, dropout=0.2, l2=1e-4,
+               n_steps=None) -> Sequential:
+    """2 lớp LSTM + BatchNorm + L2 regularization.
+    n_steps: số bước dự đoán (None → dùng N_PREDICT_STEPS từ config).
+    """
+    n_steps = n_steps or N_PREDICT_STEPS
     m = Sequential(name='LSTM')
     m.add(Input(shape=input_shape))
     m.add(LSTM(units, return_sequences=True, kernel_regularizer=l2_reg(l2)))
@@ -28,13 +32,15 @@ def build_lstm(input_shape, units=64, dropout=0.2, l2=1e-4) -> Sequential:
     m.add(LSTM(units // 2, kernel_regularizer=l2_reg(l2)))
     m.add(BatchNormalization()); m.add(Dropout(dropout))
     m.add(Dense(32, activation='relu'))
-    m.add(Dense(1))
+    m.add(Dense(n_steps))
     m.compile(optimizer='adam', loss='mean_squared_error', metrics=['mae'])
     return m
 
 
-def build_bilstm(input_shape, units=64, dropout=0.2, l2=1e-4) -> Sequential:
+def build_bilstm(input_shape, units=64, dropout=0.2, l2=1e-4,
+                 n_steps=None) -> Sequential:
     """Bidirectional LSTM — học pattern 2 chiều."""
+    n_steps = n_steps or N_PREDICT_STEPS
     m = Sequential(name='BiLSTM')
     m.add(Input(shape=input_shape))
     m.add(Bidirectional(LSTM(units, return_sequences=True,
@@ -43,19 +49,21 @@ def build_bilstm(input_shape, units=64, dropout=0.2, l2=1e-4) -> Sequential:
     m.add(Bidirectional(LSTM(units // 2, kernel_regularizer=l2_reg(l2))))
     m.add(BatchNormalization()); m.add(Dropout(dropout))
     m.add(Dense(32, activation='relu'))
-    m.add(Dense(1))
+    m.add(Dense(n_steps))
     m.compile(optimizer='adam', loss='mean_squared_error', metrics=['mae'])
     return m
 
 
 def build_cnnlstm(input_shape, filters=64, kernel_size=3,
-                   lstm_units=64, dropout=0.2, l2=1e-4) -> Sequential:
+                   lstm_units=64, dropout=0.2, l2=1e-4,
+                   n_steps=None) -> Sequential:
     """
     CNN-LSTM Hybrid:
       Conv1D (x2) → trích xuất pattern cục bộ ngắn hạn
       MaxPooling   → giữ đặc trưng nổi bật
       LSTM         → học xu hướng dài hạn
     """
+    n_steps = n_steps or N_PREDICT_STEPS
     m = Sequential(name='CNN-LSTM')
     m.add(Input(shape=input_shape))
     m.add(Conv1D(filters=filters, kernel_size=kernel_size,
@@ -67,7 +75,7 @@ def build_cnnlstm(input_shape, filters=64, kernel_size=3,
     m.add(LSTM(lstm_units, kernel_regularizer=l2_reg(l2)))
     m.add(BatchNormalization()); m.add(Dropout(dropout))
     m.add(Dense(32, activation='relu'))
-    m.add(Dense(1))
+    m.add(Dense(n_steps))
     m.compile(optimizer='adam', loss='mean_squared_error', metrics=['mae'])
     return m
 
@@ -93,6 +101,7 @@ def ensemble_predict(predictions: dict, val_losses: dict):
     """
     Dynamic weighted ensemble: trọng số tỉ lệ nghịch với val_loss.
     Model val_loss thấp hơn → đóng góp nhiều hơn.
+    Hỗ trợ cả single-step (1D) và multi-step (2D) predictions.
     """
     weights = {k: 1.0 / max(v, 1e-9) for k, v in val_losses.items()}
     total   = sum(weights.values())
