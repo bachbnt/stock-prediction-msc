@@ -7,6 +7,7 @@ def _rsi(series: pd.Series, period=14) -> pd.Series:
     delta = series.diff()
     gain  = delta.clip(lower=0).rolling(period).mean()
     loss  = (-delta.clip(upper=0)).rolling(period).mean()
+    # Replace zero losses with NaN to avoid division by zero in RSI formula
     return 100 - (100 / (1 + gain / loss.replace(0, np.nan)))
 
 
@@ -26,9 +27,9 @@ def _bollinger(series: pd.Series, period=20, n_std=2):
 
 def add_features(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Thêm 14 technical indicators vào DataFrame.
-    Input/output cột đều lowercase.
-    Xoá NaN do rolling window và reset index.
+    Add 14 technical indicators to the DataFrame.
+    All input and output column names are lowercase.
+    Drops NaN rows introduced by rolling windows and resets the index.
     """
     df = df.copy()
 
@@ -49,15 +50,15 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # Bollinger Bands
     bb_u, bb_m, bb_l   = _bollinger(df['close'])
-    df['bb_width']     = (bb_u - bb_l) / bb_m
-    df['bb_pct']       = (df['close'] - bb_l) / (bb_u - bb_l).replace(0, np.nan)
+    df['bb_width']     = (bb_u - bb_l) / bb_m          # band width relative to midline
+    df['bb_pct']       = (df['close'] - bb_l) / (bb_u - bb_l).replace(0, np.nan)  # price position within band (0=lower, 1=upper)
 
     # Volume
     vol_ma             = df['volume'].rolling(20).mean()
-    df['volume_ratio'] = df['volume'] / vol_ma.replace(0, np.nan)
+    df['volume_ratio'] = df['volume'] / vol_ma.replace(0, np.nan)  # volume relative to 20-day average
 
     # Candlestick ratios
-    df['hl_ratio']     = df['high'] / df['low'].replace(0, np.nan)
-    df['co_ratio']     = df['close'] / df['open'].replace(0, np.nan)
+    df['hl_ratio']     = df['high'] / df['low'].replace(0, np.nan)   # high-to-low range ratio
+    df['co_ratio']     = df['close'] / df['open'].replace(0, np.nan) # close-to-open ratio (>1 = bullish candle)
 
     return df.dropna().reset_index(drop=True)

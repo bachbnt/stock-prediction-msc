@@ -1,15 +1,15 @@
 # portfolio.py — Markowitz Mean-Variance Portfolio Optimization
 """
-Dùng predicted returns từ LSTM ensemble để ước lượng expected returns,
-kết hợp với historical covariance → tìm danh mục tối ưu.
+Uses predicted returns from the LSTM ensemble to estimate expected returns,
+combined with historical covariance to find the optimal portfolio allocation.
 
-Hai chiến lược:
-  1. Min-Variance Portfolio  — rủi ro thấp nhất
-  2. Max-Sharpe Portfolio    — hiệu quả vốn cao nhất
+Two optimization strategies:
+  1. Min-Variance Portfolio  — lowest possible risk
+  2. Max-Sharpe Portfolio    — best risk-adjusted return
 
-So sánh với:
-  - Equal-weight (1/N)
-  - Single-stock Ensemble strategy (từ evaluate.py)
+Compared against:
+  - Equal-weight (1/N) baseline
+  - Single-stock Ensemble strategy (from evaluate.py)
 """
 import numpy as np
 import pandas as pd
@@ -28,16 +28,17 @@ from config import (SYMBOLS, RISK_FREE_RATE, INITIAL_CAPITAL,
 
 def compute_expected_returns(all_results: list) -> np.ndarray:
     """
-    Dùng predicted return trung bình của Ensemble trên test set
-    làm expected annual return cho từng mã.
+    Use the average predicted return from the Ensemble model on the test set
+    as the expected annualized return for each stock symbol.
 
-    Returns: array shape (n_symbols,)
+    Returns: array of shape (n_symbols,)
     """
     exp_rets = []
     for r in all_results:
         pred  = r['predictions']['Ensemble']
-        # Daily return trung bình từ predicted prices
+        # Compute daily percentage returns from the predicted price series
         daily_rets = np.diff(pred) / pred[:-1]
+        # Annualize by multiplying the mean daily return by 252 trading days
         ann_ret    = float(np.mean(daily_rets)) * 252
         exp_rets.append(ann_ret)
     return np.array(exp_rets)
@@ -45,9 +46,9 @@ def compute_expected_returns(all_results: list) -> np.ndarray:
 
 def compute_cov_matrix(all_results: list) -> np.ndarray:
     """
-    Tính annualized covariance matrix từ actual daily returns của test set.
+    Compute the annualized covariance matrix from actual daily returns on the test set.
 
-    Returns: array shape (n_symbols, n_symbols)
+    Returns: array of shape (n_symbols, n_symbols)
     """
     daily_rets_list = []
     for r in all_results:
@@ -55,10 +56,11 @@ def compute_cov_matrix(all_results: list) -> np.ndarray:
         daily_rets = np.diff(real) / real[:-1]
         daily_rets_list.append(daily_rets)
 
-    # Align lengths
+    # Align all return series to the shortest length before stacking into a matrix
     min_len = min(len(x) for x in daily_rets_list)
     mat     = np.column_stack([x[:min_len] for x in daily_rets_list])
-    cov     = np.cov(mat, rowvar=False) * 252   # annualize
+    # Multiply by 252 to convert the daily covariance to an annualized figure
+    cov     = np.cov(mat, rowvar=False) * 252
 
     return cov
 
@@ -69,29 +71,33 @@ def compute_cov_matrix(all_results: list) -> np.ndarray:
 
 def _portfolio_stats(weights: np.ndarray, exp_rets: np.ndarray,
                      cov: np.ndarray) -> tuple:
-    """Tính return, volatility, sharpe cho một bộ weights."""
+    """Compute annualized return, volatility, and Sharpe ratio for a given weight vector."""
     ret  = float(np.dot(weights, exp_rets))
     vol  = float(np.sqrt(weights @ cov @ weights))
-    rf   = RISK_FREE_RATE * 252
+    rf   = RISK_FREE_RATE * 252   # annualized risk-free rate
+    # Guard against near-zero volatility to avoid division-by-zero
     shrp = (ret - rf) / vol if vol > 1e-10 else 0.0
     return ret, vol, shrp
 
 
 def optimize_portfolio(exp_rets: np.ndarray, cov: np.ndarray) -> dict:
     """
-    Markowitz MVO:
-      - Min-Variance: minimize σ subject to Σw=1, w>=0
-      - Max-Sharpe:   minimize -Sharpe subject to Σw=1, w>=0
+    Markowitz Mean-Variance Optimization (MVO):
+      - Min-Variance: minimize portfolio variance subject to Σw=1, w>=0
+      - Max-Sharpe:   minimize negative Sharpe ratio subject to Σw=1, w>=0
 
-    Returns dict với weights + stats cho mỗi chiến lược.
+    Returns a dict with weights and performance stats for each strategy.
     """
     n = len(exp_rets)
+    # Equality constraint: weights must sum to 1 (fully invested portfolio)
     constraints = {'type': 'eq', 'fun': lambda w: np.sum(w) - 1}
+    # Long-only constraint: no short selling allowed
     bounds      = tuple((0.0, 1.0) for _ in range(n))
-    w0          = np.ones(n) / n   # equal-weight khởi đầu
+    w0          = np.ones(n) / n   # start from equal-weight as the initial guess
 
     # ── Min-Variance ──────────────────────────────────────────────────────────
     def neg_variance(w):
+        # Objective: minimize portfolio variance (w^T * Cov * w)
         return float(w @ cov @ w)
 
     res_mv = minimize(neg_variance, w0, method='SLSQP',
@@ -102,6 +108,7 @@ def optimize_portfolio(exp_rets: np.ndarray, cov: np.ndarray) -> dict:
 
     # ── Max-Sharpe ────────────────────────────────────────────────────────────
     def neg_sharpe(w):
+        # Objective: minimize negative Sharpe (equivalent to maximizing Sharpe)
         _, vol, shrp = _portfolio_stats(w, exp_rets, cov)
         return -shrp
 
@@ -128,20 +135,21 @@ def optimize_portfolio(exp_rets: np.ndarray, cov: np.ndarray) -> dict:
 
 def backtest_portfolio(weights: np.ndarray, all_results: list) -> np.ndarray:
     """
-    Backtest: phân bổ INITIAL_CAPITAL theo weights cho từng mã.
-    Mỗi mã áp dụng chiến lược Ensemble (signal từ dự đoán).
-    Tổng giá trị danh mục = Σ weight_i × portfolio_value_i
+    Backtest: allocate INITIAL_CAPITAL across symbols according to the given weights.
+    Each symbol uses the Ensemble trading strategy (signal derived from predictions).
+    Total portfolio value = Σ weight_i × portfolio_value_i
 
-    Returns: array portfolio values theo thời gian.
+    Returns: array of portfolio values over time.
     """
     port_series = []
     for r, w in zip(all_results, weights):
         td   = r['trading']['Ensemble']
-        pv   = td['port_vals']                 # giá trị danh mục mã i
-        pv_w = w * (pv / pv[0]) * INITIAL_CAPITAL   # re-scale
+        pv   = td['port_vals']                       # raw portfolio value for symbol i
+        # Re-scale so that the weighted contribution starts at w * INITIAL_CAPITAL
+        pv_w = w * (pv / pv[0]) * INITIAL_CAPITAL
         port_series.append(pv_w)
 
-    # Align lengths
+    # Align all series to the same length before summing across symbols
     min_len = min(len(p) for p in port_series)
     total   = np.sum([p[:min_len] for p in port_series], axis=0)
     return total
@@ -154,9 +162,9 @@ def backtest_portfolio(weights: np.ndarray, all_results: list) -> np.ndarray:
 def monte_carlo_frontier(exp_rets: np.ndarray, cov: np.ndarray,
                           n_sims: int = N_PORTFOLIO_SIMS) -> dict:
     """
-    Random portfolio simulation để vẽ efficient frontier.
+    Simulate random portfolios to approximate the efficient frontier.
 
-    Returns: dict với arrays 'returns', 'vols', 'sharpes'
+    Returns: dict with arrays 'returns', 'vols', 'sharpes' — one entry per simulation.
     """
     n        = len(exp_rets)
     rf       = RISK_FREE_RATE * 252
@@ -164,9 +172,10 @@ def monte_carlo_frontier(exp_rets: np.ndarray, cov: np.ndarray,
     vols_v   = np.zeros(n_sims)
     sharps_v = np.zeros(n_sims)
 
-    rng = np.random.default_rng(42)
+    rng = np.random.default_rng(42)   # fixed seed for reproducibility
     for i in range(n_sims):
-        w = rng.dirichlet(np.ones(n))    # random weights sum to 1
+        # Dirichlet distribution naturally produces weights that sum to 1
+        w = rng.dirichlet(np.ones(n))
         r, v, s = _portfolio_stats(w, exp_rets, cov)
         rets_v[i]   = r
         vols_v[i]   = v
@@ -182,9 +191,9 @@ def monte_carlo_frontier(exp_rets: np.ndarray, cov: np.ndarray,
 def plot_portfolio(all_results: list, opt_result: dict,
                    mc_frontier: dict, save_dir: str = 'plot'):
     """
-    2 biểu đồ:
-      1. Efficient Frontier (scatter Monte Carlo + điểm tối ưu)
-      2. Portfolio equity curve so sánh Min-Var, Max-Sharpe, Equal-Weight
+    Generate two charts:
+      1. Efficient Frontier (Monte Carlo scatter plot + optimal portfolio markers)
+      2. Portfolio equity curves comparing Min-Variance, Max-Sharpe, and Equal-Weight
     """
     import os
     os.makedirs(save_dir, exist_ok=True)
@@ -196,12 +205,14 @@ def plot_portfolio(all_results: list, opt_result: dict,
 
     # ── 1. Efficient Frontier ─────────────────────────────────────────────────
     ax = axes[0]
+    # Color each simulated portfolio by its Sharpe ratio to highlight the efficient frontier
     sc = ax.scatter(mc_frontier['vols'] * 100,
                     mc_frontier['returns'] * 100,
                     c=mc_frontier['sharpes'], cmap='viridis',
                     alpha=0.4, s=8)
     plt.colorbar(sc, ax=ax, label='Sharpe Ratio')
 
+    # Overlay the three optimized portfolio points with distinct markers
     markers = {'min_variance': ('*', '#e74c3c', 'Min-Variance'),
                'max_sharpe':   ('D', '#3498db', 'Max-Sharpe'),
                'equal_weight': ('s', '#2ecc71', 'Equal-Weight')}
@@ -226,15 +237,16 @@ def plot_portfolio(all_results: list, opt_result: dict,
 
     for key in ['min_variance', 'max_sharpe', 'equal_weight']:
         pv = backtest_portfolio(opt_result[key]['weights'], all_results)
+        # Show total return percentage in the legend label for quick comparison
         ax2.plot(pv / 1e6, color=colors_map[key], lw=1.5,
                  label=f"{labels_map[key]} ({(pv[-1]/pv[0]-1)*100:.1f}%)")
 
-    ax2.set_title('Portfolio Value (VND)'); ax2.set_ylabel('Triệu VND')
-    ax2.set_xlabel('Ngày giao dịch')
+    ax2.set_title('Portfolio Value (VND)'); ax2.set_ylabel('Million VND')
+    ax2.set_xlabel('Trading Day')
     ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{x:.1f}M'))
     ax2.legend(); ax2.grid(True, alpha=0.3)
 
-    # Weight table dưới plot
+    # Weight allocation table placed below the equity curve chart
     w_data = [[f'{w*100:.1f}%' for w in opt_result[k]['weights']]
               for k in ['min_variance', 'max_sharpe', 'equal_weight']]
     row_labels = ['Min-Var', 'Max-Sharpe', 'EW']
@@ -257,7 +269,7 @@ def plot_portfolio(all_results: list, opt_result: dict,
 def print_portfolio_summary(opt_result: dict, all_results: list):
     symbols = [r['symbol'] for r in all_results]
     print(f"\n{'═'*65}")
-    print("  PORTFOLIO OPTIMIZATION — KẾT QUẢ")
+    print("  PORTFOLIO OPTIMIZATION — RESULTS")
     print(f"{'═'*65}")
     print(f"  {'Strategy':<15} {'Ann.Ret%':>9} {'Ann.Vol%':>9} "
           f"{'Sharpe':>8}  {'Weights'}")

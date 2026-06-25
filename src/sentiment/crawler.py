@@ -1,11 +1,11 @@
-# sentiment/crawler.py — Thu thập tin tức tài chính tiếng Việt
+# sentiment/crawler.py — Collect Vietnamese financial news articles
 """
-Hai nguồn:
-  A. Google News (pygooglenews) — dễ dùng, có lịch sử, tiêu đề + link
-  B. VnExpress search API      — full content, cần parse HTML
+Two sources:
+  A. Google News (pygooglenews) — easy to use, historical data, title + link
+  B. VnExpress search API      — full content, requires HTML parsing
 
 Output: list of dicts [{'date': str, 'title': str, 'content': str, 'source': str}]
-Lưu cache vào: data/news/<symbol>/<YYYY-MM>.json
+Cache saved to: data/news/<symbol>/<YYYY-MM>.json
 """
 import os
 import json
@@ -24,13 +24,13 @@ logger = logging.getLogger(__name__)
 def fetch_google_news(symbol: str, start: str, end: str,
                       query_extra: str = 'cổ phiếu') -> list:
     """
-    Fetch tin tức từ Google News RSS.
+    Fetch news articles from Google News RSS feed.
 
     Args:
-        symbol:      Mã cổ phiếu (e.g. 'FPT')
+        symbol:      Stock ticker symbol (e.g. 'FPT')
         start:       'YYYY-MM-DD'
         end:         'YYYY-MM-DD'
-        query_extra: Từ khoá thêm vào query (mặc định: 'cổ phiếu')
+        query_extra: Additional keyword appended to query (default: 'cổ phiếu' — Vietnamese for 'stock')
 
     Returns:
         list of {'date', 'title', 'url', 'source'}
@@ -38,14 +38,14 @@ def fetch_google_news(symbol: str, start: str, end: str,
     try:
         from pygooglenews import GoogleNews
     except ImportError:
-        logger.error("pygooglenews chưa được cài. Chạy: pip install pygooglenews")
+        logger.error("pygooglenews is not installed. Run: pip install pygooglenews")
         return []
 
     gn      = GoogleNews(lang='vi', country='VN')
     query   = f'{symbol} {query_extra}'
     results = []
 
-    # pygooglenews nhận date theo format YYYY-MM-DD
+    # pygooglenews accepts dates in YYYY-MM-DD format
     try:
         search = gn.search(query, from_=start, to_=end)
         for entry in search.get('entries', []):
@@ -53,18 +53,18 @@ def fetch_google_news(symbol: str, start: str, end: str,
             try:
                 date = datetime.strptime(pub[:16], '%a, %d %b %Y').strftime('%Y-%m-%d')
             except ValueError:
-                date = start  # fallback
+                date = start  # fallback to start date if parsing fails
 
             results.append({
                 'date':    date,
                 'title':   entry.get('title', '').strip(),
                 'url':     entry.get('link', ''),
-                'content': '',           # sẽ fetch sau nếu cần
+                'content': '',           # will be fetched later if needed
                 'source':  'google_news',
             })
         logger.info(f"[{symbol}] Google News: {len(results)} articles ({start} → {end})")
     except Exception as e:
-        logger.error(f"[{symbol}] Google News lỗi: {e}")
+        logger.error(f"[{symbol}] Google News error: {e}")
 
     return results
 
@@ -76,8 +76,8 @@ def fetch_google_news(symbol: str, start: str, end: str,
 def fetch_vnexpress(symbol: str, start: str, end: str,
                     delay: float = 1.0) -> list:
     """
-    Scrape VnExpress search results cho mã cổ phiếu.
-    Rate-limited (delay giây giữa các request).
+    Scrape VnExpress search results for a given stock ticker.
+    Rate-limited (delay seconds between requests to avoid being blocked).
 
     Returns:
         list of {'date', 'title', 'content', 'url', 'source'}
@@ -86,13 +86,14 @@ def fetch_vnexpress(symbol: str, start: str, end: str,
         import requests
         from bs4 import BeautifulSoup
     except ImportError:
-        logger.error("requests/beautifulsoup4 chưa được cài.")
+        logger.error("requests/beautifulsoup4 are not installed.")
         return []
 
     headers = {'User-Agent': 'Mozilla/5.0 (compatible; StockSentimentBot/1.0)'}
     results = []
     page    = 1
 
+    # Convert date strings to Unix timestamps required by VnExpress search API
     start_ts = int(datetime.strptime(start, '%Y-%m-%d').timestamp())
     end_ts   = int(datetime.strptime(end, '%Y-%m-%d').timestamp())
 
@@ -106,7 +107,7 @@ def fetch_vnexpress(symbol: str, start: str, end: str,
 
             articles = soup.select('article.item-news')
             if not articles:
-                break
+                break  # no more pages
 
             for art in articles:
                 title_el = art.select_one('h3.title-news a, h2.title-news a')
@@ -117,7 +118,7 @@ def fetch_vnexpress(symbol: str, start: str, end: str,
                 content = desc_el.get_text(strip=True)  if desc_el  else ''
                 art_url = title_el['href'] if title_el and title_el.get('href') else ''
 
-                # Parse date từ data attribute hoặc text
+                # Parse date from data attribute or fall back to start date
                 date = start
                 if date_el and date_el.get('data-publish'):
                     try:
@@ -139,7 +140,7 @@ def fetch_vnexpress(symbol: str, start: str, end: str,
             time.sleep(delay)
 
         except Exception as e:
-            logger.error(f"[{symbol}] VnExpress page {page} lỗi: {e}")
+            logger.error(f"[{symbol}] VnExpress page {page} error: {e}")
             break
 
     logger.info(f"[{symbol}] VnExpress: {len(results)} articles ({start} → {end})")
@@ -152,21 +153,21 @@ def fetch_vnexpress(symbol: str, start: str, end: str,
 
 def save_news_cache(symbol: str, articles: list,
                     cache_dir: str = 'data/news'):
-    """Lưu articles ra JSON, nhóm theo tháng."""
+    """Save articles to JSON files, grouped by month."""
     by_month: dict = {}
     for art in articles:
-        month = art['date'][:7]   # YYYY-MM
+        month = art['date'][:7]   # extract YYYY-MM from YYYY-MM-DD
         by_month.setdefault(month, []).append(art)
 
     for month, arts in by_month.items():
         path = os.path.join(cache_dir, symbol, f'{month}.json')
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        # Merge với cache hiện có
+        # Merge with existing cache to avoid overwriting previously fetched data
         existing = []
         if os.path.exists(path):
             with open(path, 'r', encoding='utf-8') as f:
                 existing = json.load(f)
-        # Deduplicate bằng title
+        # Deduplicate by title to avoid storing the same article twice
         all_arts   = existing + arts
         seen_titles = set()
         deduped    = []
@@ -181,7 +182,7 @@ def save_news_cache(symbol: str, articles: list,
 
 def load_news_cache(symbol: str, start: str, end: str,
                     cache_dir: str = 'data/news') -> list:
-    """Load tất cả articles từ cache trong khoảng [start, end]."""
+    """Load all cached articles within the [start, end] date range."""
     articles = []
     start_m  = start[:7]; end_m = end[:7]
     sym_dir  = os.path.join(cache_dir, symbol)
@@ -192,12 +193,12 @@ def load_news_cache(symbol: str, start: str, end: str,
     for fname in sorted(os.listdir(sym_dir)):
         if not fname.endswith('.json'):
             continue
-        month = fname[:-5]   # YYYY-MM
+        month = fname[:-5]   # strip .json to get YYYY-MM
         if month < start_m or month > end_m:
-            continue
+            continue  # skip months outside the requested range
         with open(os.path.join(sym_dir, fname), 'r', encoding='utf-8') as f:
             arts = json.load(f)
-        # Filter theo ngày chính xác
+        # Filter to exact date range (monthly files may contain out-of-range dates)
         articles.extend([a for a in arts if start <= a['date'] <= end])
 
     return articles
@@ -212,17 +213,17 @@ def crawl_news(symbol: str, start: str, end: str,
                cache_dir: str = 'data/news',
                force_refresh: bool = False) -> list:
     """
-    Thu thập tin tức, dùng cache nếu có.
+    Collect news articles, using cache if available.
 
     Args:
-        symbol:        Mã cổ phiếu
+        symbol:        Stock ticker symbol
         start/end:     'YYYY-MM-DD'
-        use_google:    Bật/tắt Google News source
-        use_vnexpress: Bật/tắt VnExpress source
-        force_refresh: Bỏ qua cache, fetch lại từ đầu
+        use_google:    Enable/disable Google News source
+        use_vnexpress: Enable/disable VnExpress source
+        force_refresh: Ignore cache and re-fetch from sources
 
     Returns:
-        list of article dicts đã deduplicate
+        list of deduplicated article dicts
     """
     if not force_refresh:
         cached = load_news_cache(symbol, start, end, cache_dir)
@@ -236,7 +237,7 @@ def crawl_news(symbol: str, start: str, end: str,
     if use_vnexpress:
         articles.extend(fetch_vnexpress(symbol, start, end))
 
-    # Deduplicate
+    # Deduplicate across sources by title
     seen   = set()
     unique = []
     for a in articles:

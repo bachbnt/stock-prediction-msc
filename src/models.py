@@ -21,8 +21,8 @@ def _callbacks():
 
 def build_lstm(input_shape, units=64, dropout=0.2, l2=1e-4,
                n_steps=None) -> Sequential:
-    """2 lớp LSTM + BatchNorm + L2 regularization.
-    n_steps: số bước dự đoán (None → dùng N_PREDICT_STEPS từ config).
+    """2-layer LSTM with BatchNorm and L2 regularization.
+    n_steps: number of forecast steps (None → uses N_PREDICT_STEPS from config).
     """
     n_steps = n_steps or N_PREDICT_STEPS
     m = Sequential(name='LSTM')
@@ -39,7 +39,7 @@ def build_lstm(input_shape, units=64, dropout=0.2, l2=1e-4,
 
 def build_bilstm(input_shape, units=64, dropout=0.2, l2=1e-4,
                  n_steps=None) -> Sequential:
-    """Bidirectional LSTM — học pattern 2 chiều."""
+    """Bidirectional LSTM — learns patterns from both forward and backward directions."""
     n_steps = n_steps or N_PREDICT_STEPS
     m = Sequential(name='BiLSTM')
     m.add(Input(shape=input_shape))
@@ -58,10 +58,10 @@ def build_cnnlstm(input_shape, filters=64, kernel_size=3,
                    lstm_units=64, dropout=0.2, l2=1e-4,
                    n_steps=None) -> Sequential:
     """
-    CNN-LSTM Hybrid:
-      Conv1D (x2) → trích xuất pattern cục bộ ngắn hạn
-      MaxPooling   → giữ đặc trưng nổi bật
-      LSTM         → học xu hướng dài hạn
+    CNN-LSTM Hybrid architecture:
+      Conv1D (x2) → extracts short-term local patterns from the time series
+      MaxPooling   → retains the most prominent features, reduces sequence length
+      LSTM         → learns long-term temporal dependencies
     """
     n_steps = n_steps or N_PREDICT_STEPS
     m = Sequential(name='CNN-LSTM')
@@ -82,7 +82,7 @@ def build_cnnlstm(input_shape, filters=64, kernel_size=3,
 
 def train_model(model: Sequential, X_train, y_train,
                 batch_size=32, val_split=0.1) -> float:
-    """Train model với EarlyStopping. Trả về best val_loss."""
+    """Train model with EarlyStopping. Returns the best validation loss achieved."""
     hist = model.fit(
         X_train, y_train,
         epochs=MAX_EPOCHS,
@@ -99,17 +99,19 @@ def train_model(model: Sequential, X_train, y_train,
 
 def ensemble_predict(predictions: dict, val_losses: dict):
     """
-    Dynamic weighted ensemble: trọng số tỉ lệ nghịch với val_loss.
-    Model val_loss thấp hơn → đóng góp nhiều hơn.
-    Hỗ trợ cả single-step (1D) và multi-step (2D) predictions.
+    Dynamic weighted ensemble: weights are inversely proportional to val_loss.
+    Models with lower validation loss contribute more to the final prediction.
+    Supports both single-step (1D) and multi-step (2D) predictions.
     """
+    # Compute raw weights as inverse of val_loss; clamp denominator to avoid div-by-zero
     weights = {k: 1.0 / max(v, 1e-9) for k, v in val_losses.items()}
     total   = sum(weights.values())
+    # Normalize weights so they sum to 1
     weights = {k: v / total for k, v in weights.items()}
 
     n    = len(next(iter(predictions.values())))
     pred = sum(weights[k] * predictions[k][:n] for k in predictions)
 
-    print(f"  [Ensemble] Trọng số: " +
+    print(f"  [Ensemble] Weights: " +
           ", ".join(f"{k}={v*100:.1f}%" for k, v in weights.items()))
     return pred, weights

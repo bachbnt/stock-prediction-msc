@@ -1,4 +1,4 @@
-# evaluate.py — Error metrics và trading strategy backtesting
+# evaluate.py — Error metrics and trading strategy backtesting
 import math
 import numpy as np
 
@@ -6,10 +6,11 @@ from config import TAX_BUY, TAX_SELL, BROKERAGE_SELL, RISK_FREE_RATE
 
 
 def compute_error_metrics(real: np.ndarray, pred: np.ndarray, label='') -> dict:
-    """RMSE, MAE, MAPE, Directional Accuracy."""
+    """Compute RMSE, MAE, MAPE, and Directional Accuracy."""
     rmse = math.sqrt(np.mean((real - pred) ** 2))
     mae  = np.mean(np.abs(real - pred))
     mape = np.mean(np.abs((real - pred) / real))
+    # Directional accuracy: fraction of steps where predicted direction matches actual
     da   = np.mean(np.sign(np.diff(real)) == np.sign(np.diff(pred)))
 
     print(f"  [{label}]  RMSE={rmse:,.0f}  MAE={mae:,.0f}  "
@@ -20,19 +21,22 @@ def compute_error_metrics(real: np.ndarray, pred: np.ndarray, label='') -> dict:
 
 def compute_trading_metrics(real: np.ndarray, pred: np.ndarray, label='') -> dict:
     """
-    Chiến lược long-only: mua khi model dự báo tăng, bán khi giảm.
-    Vốn ban đầu: 10,000,000 VND. Tính đủ thuế + phí môi giới.
+    Long-only trading strategy: buy when model predicts price increase, sell when decrease.
+    Initial capital: 10,000,000 VND. Accounts for buy/sell tax and brokerage fees.
     """
     initial  = 10_000_000
     cash, shares = float(initial), 0.0
     port_vals, daily_rets = [initial], []
 
     for i in range(len(real) - 1):
+        # Buy signal: predicted price rises and we are currently flat (no shares held)
         if pred[i + 1] > pred[i] and shares == 0 and cash > 0:
             shares = cash / (real[i] * (1 + TAX_BUY)); cash = 0.0
+        # Sell signal: predicted price falls or stays flat and we hold shares
         elif pred[i + 1] <= pred[i] and shares > 0:
             cash = shares * real[i] * (1 - TAX_SELL - BROKERAGE_SELL); shares = 0.0
 
+        # Mark-to-market portfolio value at end of period i+1
         pv = cash + shares * real[i + 1]
         port_vals.append(pv)
         daily_rets.append((pv - port_vals[-2]) / port_vals[-2])
@@ -40,15 +44,19 @@ def compute_trading_metrics(real: np.ndarray, pred: np.ndarray, label='') -> dic
     port_vals  = np.array(port_vals)
     daily_rets = np.array(daily_rets)
 
+    # Buy-and-hold benchmark: invest all capital at t=0 and hold through the period
     bh_vals      = initial / (real[0] * (1 + TAX_BUY)) * real
     total_return = (port_vals[-1] - initial) / initial
     bh_return    = (bh_vals[-1] - initial) / initial
 
+    # Annualized Sharpe ratio (252 trading days per year); guard against zero std
     sharpe = ((daily_rets.mean() - RISK_FREE_RATE) / daily_rets.std()
               * math.sqrt(252)) if daily_rets.std() > 1e-10 else 0.0
 
+    # Maximum drawdown: largest peak-to-trough decline in portfolio value
     peak         = np.maximum.accumulate(port_vals)
     max_drawdown = float(((port_vals - peak) / peak).min())
+    # Calmar ratio: annualized return divided by absolute max drawdown
     calmar       = total_return / abs(max_drawdown) if max_drawdown else 0.0
 
     print(f"  [{label}]  Return={total_return*100:.1f}%  "

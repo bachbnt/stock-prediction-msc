@@ -10,20 +10,28 @@ __pycache__/
 *.pyd
 .Python
 
-# Keras / TF saved models
-*.h5
-*.keras
+# Keras / TF saved models — tracked via Git LFS if available
+# (remove the lines below if you want to commit models directly)
 saved_model/
 checkpoints/
 
 # Jupyter
 .ipynb_checkpoints/
+*.ipynb
 
 # IDE
 .idea/
 .vscode/
 *.iml
+*.swp
 
 # OS
 .DS_Store
+.AppleDouble
 Thumbs.db
+
+# pyenv
+.python-version
+
+# Logs
+*.log

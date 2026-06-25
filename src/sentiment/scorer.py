@@ -1,20 +1,20 @@
-# sentiment/scorer.py — Tính sentiment score bằng PhoBERT
+# sentiment/scorer.py — Compute sentiment scores using PhoBERT
 """
-Hai chế độ:
-  1. Zero-shot (không cần fine-tune):
-       Dùng 'vinai/phobert-base' + MLM-based keyword scoring
-       → nhanh, không cần data, độ chính xác trung bình
+Two modes:
+  1. Zero-shot (no fine-tuning required):
+       Uses 'vinai/phobert-base' + MLM-based keyword scoring
+       → fast, no labeled data needed, moderate accuracy
 
-  2. Fine-tuned (cần ~500-1000 mẫu gán nhãn):
-       Dùng AutoModelForSequenceClassification fine-tuned
-       → chậm hơn, độ chính xác cao hơn đáng kể
+  2. Fine-tuned (requires ~500-1000 labeled samples):
+       Uses AutoModelForSequenceClassification fine-tuned on domain data
+       → slower, significantly higher accuracy
 
 Labels: POSITIVE (+1), NEUTRAL (0), NEGATIVE (-1)
 
-Cài đặt:
+Installation:
   pip install transformers torch sentencepiece
   # Apple Silicon:
-  pip install transformers torch sentencepiece  # torch tự dùng MPS
+  pip install transformers torch sentencepiece  # torch will automatically use MPS
 """
 import logging
 import numpy as np
@@ -22,12 +22,14 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# ── Từ điển keyword-based cho zero-shot fallback ──────────────────────────────
+# ── Vietnamese keyword dictionary for zero-shot fallback ─────────────────────
+# Positive financial keywords (growth, profit, contracts, dividends, etc.)
 _POS_KEYWORDS = [
     'tăng', 'tăng trưởng', 'lợi nhuận', 'vượt', 'kỷ lục', 'kế hoạch', 'ký kết',
     'hợp đồng', 'thắng', 'triển vọng', 'tốt', 'khả quan', 'mua', 'upside',
     'tích cực', 'tăng mạnh', 'đột phá', 'cổ tức', 'thưởng', 'chia cổ phiếu',
 ]
+# Negative financial keywords (losses, violations, debt, sell-offs, etc.)
 _NEG_KEYWORDS = [
     'giảm', 'lỗ', 'thua', 'vi phạm', 'phạt', 'khởi tố', 'điều tra', 'nợ xấu',
     'bán tháo', 'giảm sâu', 'thấp nhất', 'rủi ro', 'khó khăn', 'áp lực',
@@ -46,6 +48,7 @@ def keyword_score(text: str) -> float:
     total = pos + neg
     if total == 0:
         return 0.0
+    # Normalize by total keyword matches so score stays in [-1, +1]
     return (pos - neg) / total
 
 
@@ -55,10 +58,10 @@ def keyword_score(text: str) -> float:
 
 class PhoBERTScorer:
     """
-    Wrapper quanh PhoBERT để tính sentiment score cho văn bản tiếng Việt.
+    Wrapper around PhoBERT to compute sentiment scores for Vietnamese text.
 
-    Nếu fine-tuned model tồn tại tại model_path → load và dùng.
-    Nếu không → dùng keyword fallback.
+    If a fine-tuned model exists at model_path → load and use it.
+    Otherwise → fall back to keyword-based scoring.
     """
 
     MODEL_NAME   = 'vinai/phobert-base-v2'
@@ -69,10 +72,10 @@ class PhoBERTScorer:
                  device: Optional[str] = None):
         """
         Args:
-            model_path: Path đến fine-tuned model directory.
-                        None → dùng keyword fallback.
+            model_path: Path to the fine-tuned model directory.
+                        None → use keyword fallback.
             device:     'cpu', 'cuda', 'mps' (Apple Silicon).
-                        None → tự detect.
+                        None → auto-detect.
         """
         self.model      = None
         self.tokenizer  = None
@@ -83,41 +86,42 @@ class PhoBERTScorer:
             self._load_model(model_path)
 
     def _detect_device(self, device: Optional[str]) -> str:
+        """Auto-detect the best available compute device."""
         if device:
             return device
         try:
             import torch
             if torch.backends.mps.is_available():
-                return 'mps'
+                return 'mps'   # Apple Silicon GPU
             if torch.cuda.is_available():
-                return 'cuda'
+                return 'cuda'  # NVIDIA GPU
         except ImportError:
             pass
         return 'cpu'
 
     def _load_model(self, model_path: str):
-        """Load fine-tuned PhoBERT từ local directory."""
+        """Load a fine-tuned PhoBERT model from a local directory."""
         try:
             from transformers import AutoTokenizer, AutoModelForSequenceClassification
             import torch
 
-            logger.info(f"Loading PhoBERT từ {model_path}...")
+            logger.info(f"Loading PhoBERT from {model_path}...")
             self.tokenizer = AutoTokenizer.from_pretrained(model_path)
             self.model     = AutoModelForSequenceClassification.from_pretrained(model_path)
             self.model.to(self.device)
-            self.model.eval()
+            self.model.eval()  # set to inference mode (disables dropout, etc.)
             self._loaded = True
             logger.info(f"PhoBERT loaded on {self.device}")
         except Exception as e:
-            logger.error(f"Không load được model: {e}. Dùng keyword fallback.")
+            logger.error(f"Failed to load model: {e}. Falling back to keyword scoring.")
 
     def score(self, text: str) -> float:
         """
-        Tính sentiment score cho một đoạn văn bản.
+        Compute sentiment score for a single text snippet.
         Returns: float in [-1, +1]
         """
         if not text or not text.strip():
-            return 0.0
+            return 0.0  # empty text is treated as neutral
 
         if not self._loaded:
             return keyword_score(text)
@@ -136,18 +140,19 @@ class PhoBERTScorer:
                 logits = self.model(**inputs).logits
                 probs  = torch.softmax(logits, dim=-1).cpu().numpy()[0]
 
-            # Weighted score: probs * labels (-1, 0, +1)
+            # Weighted dot product: probs * label values (-1, 0, +1)
+            # Gives a continuous score in [-1, +1] rather than a hard class label
             labels = np.array([-1.0, 0.0, 1.0])
             score  = float(np.dot(probs, labels))
             return np.clip(score, -1.0, 1.0)
 
         except Exception as e:
-            logger.warning(f"PhoBERT inference lỗi: {e}. Dùng keyword fallback.")
+            logger.warning(f"PhoBERT inference error: {e}. Falling back to keyword scoring.")
             return keyword_score(text)
 
     def score_batch(self, texts: list, batch_size: int = 32) -> list:
         """
-        Tính sentiment scores cho nhiều văn bản.
+        Compute sentiment scores for a list of texts in batches.
         Returns: list of floats in [-1, +1]
         """
         if not self._loaded:
@@ -169,12 +174,13 @@ class PhoBERTScorer:
                     logits = self.model(**inputs).logits
                     probs  = torch.softmax(logits, dim=-1).cpu().numpy()
                 labels = np.array([-1.0, 0.0, 1.0])
+                # Compute weighted score for each sample in the batch
                 batch_scores = [float(np.clip(np.dot(p, labels), -1.0, 1.0))
                                 for p in probs]
                 scores.extend(batch_scores)
             return scores
         except Exception as e:
-            logger.warning(f"Batch inference lỗi: {e}")
+            logger.warning(f"Batch inference error: {e}")
             return [keyword_score(t) for t in texts]
 
 
@@ -185,12 +191,12 @@ class PhoBERTScorer:
 def fine_tune_phobert(train_csv: str, output_dir: str = 'models/phobert_sentiment',
                       num_epochs: int = 3, batch_size: int = 16):
     """
-    Fine-tune PhoBERT trên tập dữ liệu gán nhãn.
+    Fine-tune PhoBERT on a labeled dataset.
 
-    train_csv: CSV với 2 cột: 'text' (tiêu đề/nội dung) và 'label' (-1, 0, 1)
+    train_csv: CSV with 2 columns: 'text' (headline/content) and 'label' (-1, 0, 1)
 
-    Chạy trên máy có GPU hoặc Apple Silicon (MPS) để nhanh hơn.
-    Ước tính: ~30 phút trên M2 Pro với 1000 samples, 3 epochs.
+    Run on a GPU or Apple Silicon (MPS) for faster training.
+    Estimated time: ~30 minutes on M2 Pro with 1000 samples, 3 epochs.
     """
     try:
         import torch
@@ -199,15 +205,15 @@ def fine_tune_phobert(train_csv: str, output_dir: str = 'models/phobert_sentimen
         from transformers import (AutoTokenizer, AutoModelForSequenceClassification,
                                    AdamW, get_linear_schedule_with_warmup)
     except ImportError:
-        logger.error("Cần: pip install transformers torch pandas")
+        logger.error("Required: pip install transformers torch pandas")
         return
 
-    # Load data
+    # Load labeled training data
     df = pd.read_csv(train_csv)
     assert 'text' in df.columns and 'label' in df.columns, \
-        "CSV cần có cột 'text' và 'label' (-1, 0, 1)"
+        "CSV must have columns 'text' and 'label' (-1, 0, 1)"
 
-    # Map labels: -1→0, 0→1, 1→2
+    # Remap sentiment labels to class indices: -1→0, 0→1, 1→2
     label_map = {-1: 0, 0: 1, 1: 2}
     df['label_id'] = df['label'].map(label_map)
 
@@ -216,7 +222,7 @@ def fine_tune_phobert(train_csv: str, output_dir: str = 'models/phobert_sentimen
         PhoBERTScorer.MODEL_NAME, num_labels=3
     )
 
-    # Simple Dataset
+    # Simple Dataset wrapper that tokenizes all texts upfront
     class NewsDataset(Dataset):
         def __init__(self, texts, labels):
             self.enc    = tokenizer(texts, truncation=True, padding=True,
@@ -234,6 +240,7 @@ def fine_tune_phobert(train_csv: str, output_dir: str = 'models/phobert_sentimen
 
     optimizer  = AdamW(model.parameters(), lr=2e-5)
     total_steps= len(dataloader) * num_epochs
+    # Linear warmup for the first 10% of steps, then linear decay
     scheduler  = get_linear_schedule_with_warmup(
         optimizer, num_warmup_steps=total_steps // 10,
         num_training_steps=total_steps
@@ -257,5 +264,5 @@ def fine_tune_phobert(train_csv: str, output_dir: str = 'models/phobert_sentimen
     model.save_pretrained(output_dir)
     tokenizer.save_pretrained(output_dir)
     logger.info(f"Model saved → {output_dir}")
-    print(f"Fine-tuning xong! Model → {output_dir}")
-    print(f"Dùng: scorer = PhoBERTScorer(model_path='{output_dir}')")
+    print(f"Fine-tuning complete! Model → {output_dir}")
+    print(f"Usage: scorer = PhoBERTScorer(model_path='{output_dir}')")
