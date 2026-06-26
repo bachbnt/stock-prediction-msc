@@ -42,7 +42,65 @@ def load_data(symbol: str, data_dir: str = 'data') -> pd.DataFrame:
 
     print(f"  [{symbol}] Loaded [{src}]: {len(df)} rows "
           f"({df['date'].iloc[0].date()} → {df['date'].iloc[-1].date()})")
+
+    # Fix any unit mismatch already baked into the CSV (e.g. from a previous
+    # partial refresh that appended vnstock thousands-VND rows to an old CSV
+    # that stored prices in a different unit). Scan every consecutive pair of
+    # rows; if a jump > 10x is found, normalise the earlier segment in-place
+    # and overwrite the CSV so subsequent runs are clean.
+    df, fixed = _fix_internal_unit_mismatch(df, symbol)
+    if fixed and os.path.exists(local):
+        save_df = df.copy()
+        save_df.columns = [c.capitalize() if c != 'date' else 'Date'
+                           for c in save_df.columns]
+        save_df.to_csv(local, index=False)
+        print(f"  [{symbol}] CSV overwritten with normalised units.")
+
     return df
+
+
+def _fix_internal_unit_mismatch(df: pd.DataFrame, symbol: str):
+    """
+    Scan the entire DataFrame for a large internal price discontinuity that
+    indicates a unit mismatch baked into the CSV (e.g. old rows in full VND
+    followed by new rows in thousands VND from a previous partial refresh).
+
+    Strategy:
+      - Compute the ratio between each consecutive close pair.
+      - If any ratio > 10, treat it as a unit boundary.
+      - Find the power-of-10 factor that makes that ratio < 3x (plausible move).
+      - Divide all rows BEFORE the boundary by that factor so the whole series
+        is in a consistent unit (matching the tail / vnstock standard).
+
+    Returns (df, fixed: bool).
+    """
+    price_cols = ['open', 'high', 'low', 'close']
+    closes = df['close'].values
+    fixed = False
+
+    for i in range(1, len(closes)):
+        a, b = closes[i - 1], closes[i]
+        if b <= 0:
+            continue
+        ratio = a / b  # looking for old (large) → new (small) direction
+
+        if ratio > 10:
+            # Find the divisor that reduces the jump to < 3x
+            factor = 1
+            for f in (10, 100, 1000):
+                if ratio / f < 3:
+                    factor = f
+                    break
+
+            print(f"  [{symbol}] Internal unit mismatch at row {i} "
+                  f"({a:,.1f} → {b:,.1f}, ratio={ratio:.0f}x). "
+                  f"Normalising rows 0–{i-1} ÷{factor}.")
+            df = df.copy()
+            df.loc[:i - 1, price_cols] = df.loc[:i - 1, price_cols] / factor
+            fixed = True
+            break  # one boundary expected; stop after first fix
+
+    return df, fixed
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
