@@ -34,14 +34,12 @@ def plot_symbol(symbol: str, df_test: pd.DataFrame, real_price: np.ndarray,
 
     # ── 2. Portfolio value ────────────────────────────────────────────────────
     ax2 = fig.add_subplot(gs[1, 0])
-    bh_done = False
+    # Plot Buy & Hold first so it appears at the top of the legend
+    first_td = next(iter(trading.values()))
+    ax2.plot(first_td['bh_vals'], label='Buy & Hold',
+             color='#7f8c8d', ls='--', lw=1.2)
     for name, td in trading.items():
         ax2.plot(td['port_vals'], label=name, color=COLORS.get(name, 'gray'), lw=1.3)
-        # Only draw the Buy & Hold baseline once (it is the same for all models)
-        if not bh_done:
-            ax2.plot(td['bh_vals'], label='Buy & Hold',
-                     color='#7f8c8d', ls='--', lw=1.2)
-            bh_done = True
     ax2.set_title('Portfolio Value (VND)', fontsize=11)
     ax2.set_ylabel('VND'); ax2.legend(fontsize=9); ax2.grid(True, alpha=0.3)
     ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{x/1e6:.1f}M'))

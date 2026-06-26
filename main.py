@@ -11,7 +11,7 @@ import pandas as pd
 import tensorflow as tf
 
 from config import (SYMBOLS, DATE_MILESTONE, WINDOW_SIZE, BATCH_SIZE,
-                    FEATURE_COLS, SEED, N_PREDICT_STEPS)
+                    FEATURE_COLS, CLOSE_IDX, SEED, N_PREDICT_STEPS)
 from data_loader import load_data, update_data, prepare_data, inverse_close
 from features    import add_features
 from models      import build_lstm, build_bilstm, build_cnnlstm, train_model, ensemble_predict
@@ -104,7 +104,12 @@ def run_symbol(symbol: str, save_dir: str = 'plot',
             print(f"  → Saved: {model_path}")
 
         raw_pred = model.predict(X_test, verbose=0)
-        pred     = inverse_close(raw_pred if n_steps == 1 else raw_pred[:, 0], scaler)
+        # Always use the first output step — handles the case where a saved
+        # model was trained with a different N_PREDICT_STEPS than the current config
+        if raw_pred.ndim == 2 and raw_pred.shape[1] > 1:
+            pred = inverse_close(raw_pred[:, 0], scaler)
+        else:
+            pred = inverse_close(raw_pred, scaler)
 
         predictions[name]    = pred
         val_losses[name]     = vl
@@ -140,9 +145,11 @@ def run_symbol(symbol: str, save_dir: str = 'plot',
     error_metrics['Ensemble'] = compute_error_metrics(real_price, pred_ens, 'Ensemble')
     trading['Ensemble']       = compute_trading_metrics(real_price, pred_ens, 'Ensemble')
 
-    # 7. Forecast future prices using the last available window
+    # 7. Forecast future prices using the last available window.
+    # horizon = n_steps so --steps also controls the forecast length.
     future_prices = _forecast_future(
-        trained_models, ens_weights, df, scaler, n_steps, WINDOW_SIZE
+        trained_models, ens_weights, df, scaler, n_steps, WINDOW_SIZE,
+        horizon=n_steps
     )
 
     # 8. Generate and save visualization
@@ -172,24 +179,59 @@ def run_symbol(symbol: str, save_dir: str = 'plot',
 
 def _forecast_future(trained_models: dict, ens_weights: dict,
                      df: pd.DataFrame, scaler, n_steps: int,
-                     window: int) -> dict:
+                     window: int, horizon: int = 1) -> dict:
     """
-    Use the most recent data window to forecast future prices.
-    Returns dict {model_name: array of n_steps future prices}.
+    Forecast the next `horizon` trading days using an iterative / auto-regressive
+    approach for single-step models (n_steps=1), or a single forward pass for
+    multi-step models (n_steps>1).
+
+    Iterative approach (n_steps=1):
+      - Predict 1 step → append predicted close to the window (other features
+        held constant at their last known values) → shift window forward → repeat.
+      - This propagates uncertainty, so predictions drift toward the mean over
+        longer horizons — which is expected behaviour.
+
+    Args:
+        horizon: number of future trading days to forecast (default 1).
     """
     from config import FEATURE_COLS
     try:
-        last_window = df[FEATURE_COLS].values[-window:]
-        last_scaled = scaler.transform(last_window)
-        X_future    = last_scaled.reshape(1, window, len(FEATURE_COLS))
-
         future = {}
-        for name, model in trained_models.items():
-            raw = model.predict(X_future, verbose=0)          # shape: (1, n_steps) or (1, 1)
-            future[name] = inverse_close(raw, scaler).flatten()
 
-        # Ensemble future forecast: weighted average of individual model forecasts
-        ens = sum(ens_weights[k] * future[k] for k in ens_weights if k in future)
+        for name, model in trained_models.items():
+            if n_steps > 1:
+                # Multi-step: single forward pass returns `n_steps` values
+                last_window = df[FEATURE_COLS].values[-window:]
+                last_scaled = scaler.transform(last_window)
+                X = last_scaled.reshape(1, window, len(FEATURE_COLS))
+                raw = model.predict(X, verbose=0)
+                future[name] = inverse_close(raw, scaler).flatten()[:horizon]
+            else:
+                # Single-step: iterative / auto-regressive forecast
+                # Start with a copy of the last `window` rows (scaled)
+                window_scaled = scaler.transform(
+                    df[FEATURE_COLS].values[-window:]
+                ).copy()   # shape: (window, n_features)
+
+                preds = []
+                for _ in range(horizon):
+                    X = window_scaled.reshape(1, window, len(FEATURE_COLS))
+                    raw = model.predict(X, verbose=0)          # (1, 1)
+                    next_price_scaled = float(raw[0, 0])
+                    preds.append(next_price_scaled)
+
+                    # Slide the window forward: drop oldest row, append new row.
+                    # Copy the last row's features and update only the close column.
+                    new_row = window_scaled[-1].copy()
+                    new_row[CLOSE_IDX] = next_price_scaled
+                    window_scaled = np.vstack([window_scaled[1:], new_row])
+
+                # Convert scaled predictions back to price domain all at once
+                future[name] = inverse_close(np.array(preds), scaler)
+
+        # Ensemble: weighted average of individual model forecasts
+        ens = sum(ens_weights[k] * future[k]
+                  for k in ens_weights if k in future)
         future['Ensemble'] = np.array(ens).flatten()
 
         return future
@@ -295,6 +337,8 @@ Examples:
                         help='Only update data, skip model training')
     parser.add_argument('--plot-only', action='store_true',
                         help='Only plot using saved models, skip retraining')
+    parser.add_argument('--portfolio-only', action='store_true',
+                        help='Re-run portfolio optimization only, skip per-symbol plots')
     parser.add_argument('--save-dir', default='plot',
                         help='Directory to save charts (default: plot/)')
     parser.add_argument('--steps', type=int, default=None,
@@ -307,6 +351,23 @@ Examples:
                         help='Path to fine-tuned PhoBERT model '
                              '(default: keyword scoring)')
     args = parser.parse_args()
+
+    # ── --portfolio-only: re-run portfolio plot using saved per-symbol results ──
+    if args.portfolio_only:
+        print("==> Re-running portfolio optimization using saved models...")
+        all_results = []
+        for symbol in args.symbols:
+            try:
+                result = run_symbol(symbol, save_dir=args.save_dir,
+                                    refresh=False, n_steps=args.steps,
+                                    plot_only=True)
+                all_results.append(result)
+            except Exception as e:
+                print(f"  ERROR {symbol}: {e}")
+        if all_results:
+            run_portfolio(all_results, args.save_dir)
+            print(f"\nDone! Portfolio plot → ./{args.save_dir}/portfolio_optimization.png")
+        exit(0)
 
     # ── --data-only: refresh data then exit ──────────────────────────────────
     if args.data_only:

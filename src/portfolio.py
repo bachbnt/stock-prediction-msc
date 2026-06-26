@@ -200,36 +200,45 @@ def plot_portfolio(all_results: list, opt_result: dict,
 
     symbols = [r['symbol'] for r in all_results]
 
-    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+    # Layout: 2 rows — top row has frontier + equity curve, bottom row has weights table
+    fig = plt.figure(figsize=(16, 8))
     fig.suptitle('Portfolio Optimization — Markowitz MVO', fontsize=14, fontweight='bold')
+    gs = fig.add_gridspec(2, 2, height_ratios=[3, 1], hspace=0.45, wspace=0.35)
 
     # ── 1. Efficient Frontier ─────────────────────────────────────────────────
-    ax = axes[0]
-    # Color each simulated portfolio by its Sharpe ratio to highlight the efficient frontier
+    ax = fig.add_subplot(gs[0, 0])
     sc = ax.scatter(mc_frontier['vols'] * 100,
                     mc_frontier['returns'] * 100,
                     c=mc_frontier['sharpes'], cmap='viridis',
                     alpha=0.4, s=8)
     plt.colorbar(sc, ax=ax, label='Sharpe Ratio')
 
-    # Overlay the three optimized portfolio points with distinct markers
     markers = {'min_variance': ('*', '#e74c3c', 'Min-Variance'),
                'max_sharpe':   ('D', '#3498db', 'Max-Sharpe'),
                'equal_weight': ('s', '#2ecc71', 'Equal-Weight')}
+
+    # Build legend entries with vol/return info embedded in the label so the
+    # chart needs no separate annotations. Line2D with color='w' (white body)
+    # gives a clean marker-only appearance in the legend.
+    from matplotlib.lines import Line2D
+    legend_elements = []
     for key, (mk, col, lbl) in markers.items():
         v = opt_result[key]['vol'] * 100
         r = opt_result[key]['ret'] * 100
-        ax.scatter(v, r, marker=mk, s=200, color=col, zorder=5, label=lbl)
-        ax.annotate(f'{lbl}\n({v:.1f}%, {r:.1f}%)',
-                    (v, r), textcoords='offset points',
-                    xytext=(8, 4), fontsize=8)
+        ax.scatter(v, r, marker=mk, s=200, color=col, zorder=5)
+        legend_elements.append(
+            Line2D([0], [0], marker=mk, color='w', markerfacecolor=col,
+                   markersize=9, label=f'{lbl}  ({v:.1f}%, {r:.1f}%)')
+        )
 
     ax.set_xlabel('Annual Volatility (%)'); ax.set_ylabel('Annual Return (%)')
-    ax.set_title('Efficient Frontier (Monte Carlo)'); ax.legend(fontsize=9)
+    ax.set_title('Efficient Frontier (Monte Carlo)')
+    ax.legend(handles=legend_elements, fontsize=8, loc='upper left')
     ax.grid(True, alpha=0.3)
+    ax.margins(0.1)  # add padding so markers near the edge don't get clipped
 
     # ── 2. Portfolio Equity Curves ────────────────────────────────────────────
-    ax2 = axes[1]
+    ax2 = fig.add_subplot(gs[0, 1])
     colors_map = {'min_variance': '#e74c3c', 'max_sharpe': '#3498db',
                   'equal_weight': '#2ecc71'}
     labels_map = {'min_variance': 'Min-Variance', 'max_sharpe': 'Max-Sharpe',
@@ -237,7 +246,6 @@ def plot_portfolio(all_results: list, opt_result: dict,
 
     for key in ['min_variance', 'max_sharpe', 'equal_weight']:
         pv = backtest_portfolio(opt_result[key]['weights'], all_results)
-        # Show total return percentage in the legend label for quick comparison
         ax2.plot(pv / 1e6, color=colors_map[key], lw=1.5,
                  label=f"{labels_map[key]} ({(pv[-1]/pv[0]-1)*100:.1f}%)")
 
@@ -246,16 +254,19 @@ def plot_portfolio(all_results: list, opt_result: dict,
     ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{x:.1f}M'))
     ax2.legend(); ax2.grid(True, alpha=0.3)
 
-    # Weight allocation table placed below the equity curve chart
+    # ── 3. Weights table — dedicated subplot row, no overlap ─────────────────
+    ax3 = fig.add_subplot(gs[1, :])
+    ax3.axis('off')
     w_data = [[f'{w*100:.1f}%' for w in opt_result[k]['weights']]
               for k in ['min_variance', 'max_sharpe', 'equal_weight']]
-    row_labels = ['Min-Var', 'Max-Sharpe', 'EW']
-    tbl = ax2.table(cellText=w_data, rowLabels=row_labels,
-                    colLabels=symbols, loc='bottom', bbox=[0, -0.4, 1, 0.25])
-    tbl.auto_set_font_size(False); tbl.set_fontsize(8)
-    ax2.set_title('Portfolio Value (VND)\n\nWeights:', pad=10)
+    row_labels = ['Min-Var', 'Max-Sharpe', 'Equal-Weight']
+    tbl = ax3.table(cellText=w_data, rowLabels=row_labels,
+                    colLabels=symbols, loc='center', cellLoc='center')
+    tbl.auto_set_font_size(False); tbl.set_fontsize(9)
+    tbl.scale(1, 1.6)
+    ax3.set_title('Weight Allocation', fontsize=10, pad=8)
 
-    plt.tight_layout(rect=[0, 0.1, 1, 1])
+    plt.tight_layout()
     path = os.path.join(save_dir, 'portfolio_optimization.png')
     plt.savefig(path, dpi=150, bbox_inches='tight')
     plt.close()

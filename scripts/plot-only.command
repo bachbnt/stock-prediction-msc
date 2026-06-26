@@ -12,8 +12,11 @@ if [ ! -d "models" ]; then
     exit 1
 fi
 
+read -p "==> Forecast days (must match what you trained with) [default: 1]: " STEPS
+STEPS=${STEPS:-1}
+
 echo "==> Plotting from saved models (no retraining)..."
-python main.py --plot-only --portfolio
+python main.py --plot-only --portfolio --steps "$STEPS"
 echo ""
 echo "==> Done! Charts saved to ./plot/"
 echo "==> Press Enter to close..."

@@ -112,7 +112,7 @@ python main.py --data-only
 # Re-plot using saved models (no retraining)
 python main.py --plot-only
 
-# Forecast next 10 trading days
+# Forecast next N trading days (iterative auto-regressive, default 1)
 python main.py --steps 10
 
 # Include Markowitz portfolio optimization
@@ -136,9 +136,11 @@ Edit `src/config.py` to change key parameters:
 
 ```python
 SYMBOLS         = ['FPT', 'VCB', 'VIC', 'HPG', 'VNM']
-DATE_MILESTONE  = '2021-01-01'   # train/test split date
+DATE_MILESTONE  = '2024-01-01'   # train/test split date — keep recent enough
+                                 # so scaler covers the current price range
 WINDOW_SIZE     = 60             # lookback window (trading days)
-N_PREDICT_STEPS = 10             # forecast horizon
+N_PREDICT_STEPS = 1              # forecast horizon: 1 = single-step (stable)
+                                 # >1 = DIRECT multi-step (experimental)
 MAX_EPOCHS      = 200
 ```
 
@@ -155,6 +157,8 @@ To update:
 python main.py --data-only
 # or double-click: scripts/refresh-data.command
 ```
+
+**Unit mismatch auto-fix:** older CSV files from some providers store prices in a different unit than vnstock v4 (thousands VND). `load_data()` automatically detects any large internal price jump (ratio > 10x) and normalises the earlier segment in-place, then overwrites the CSV. No manual intervention needed.
 
 ---
 
