@@ -13,6 +13,8 @@ echo "==> Python: $(python --version)"
 echo ""
 
 VALID_SYMBOLS="FPT VCB VIC HPG VNM MWG SSI PNJ"
+DEFAULT_SYMBOLS="FPT VCB VIC HPG VNM"
+DEFAULT_STEPS=1
 
 echo "─────────────────────────────────────────"
 echo "  Stock Prediction — Configuration"
@@ -21,9 +23,10 @@ echo "────────────────────────�
 
 # ── Symbols (with validation) ─────────────────────────────────────────────────
 while true; do
-    read -p "  Symbols to run       [default: all]:     " SYMBOLS_INPUT
+    read -p "  Symbols to run       [default: $DEFAULT_SYMBOLS]: " SYMBOLS_INPUT
     if [ -z "$SYMBOLS_INPUT" ]; then
-        break  # use all
+        SYMBOLS_INPUT="$DEFAULT_SYMBOLS"
+        break
     fi
     INVALID=""
     for sym in $SYMBOLS_INPUT; do
@@ -42,8 +45,8 @@ done
 
 # ── Steps (must be a positive integer) ────────────────────────────────────────
 while true; do
-    read -p "  Forecast days ahead  [default: 1]:       " STEPS
-    STEPS=${STEPS:-1}
+    read -p "  Forecast days ahead  [default: $DEFAULT_STEPS]:       " STEPS
+    STEPS=${STEPS:-$DEFAULT_STEPS}
     if [[ "$STEPS" =~ ^[1-9][0-9]*$ ]]; then
         break
     else
@@ -51,22 +54,40 @@ while true; do
     fi
 done
 
-read -p "  Refresh data first?  [y/N]:              " REFRESH
-read -p "  Include sentiment?   [y/N]:              " SENTIMENT
+read -p "  Refresh data first?  [default: No] (y/N): " REFRESH
+read -p "  Include sentiment?   [default: No] (y/N): " SENTIMENT
 
+REFRESH=${REFRESH:-N}
+SENTIMENT=${SENTIMENT:-N}
+REFRESH_LABEL="No"
+SENTIMENT_LABEL="No"
+[[ "$REFRESH"   =~ ^[Yy]$ ]] && REFRESH_LABEL="Yes"
+[[ "$SENTIMENT" =~ ^[Yy]$ ]] && SENTIMENT_LABEL="Yes"
+
+echo "─────────────────────────────────────────"
+echo "  Selected configuration"
+echo "  Symbols:             $SYMBOLS_INPUT"
+echo "  Forecast days:       $STEPS"
+echo "  Portfolio:           Yes"
+echo "  Refresh data:        $REFRESH_LABEL"
+echo "  Include sentiment:   $SENTIMENT_LABEL"
 echo "─────────────────────────────────────────"
 echo ""
 
 # ── Build and run command ──────────────────────────────────────────────────────
-CMD="python main.py --portfolio --steps $STEPS"
+CMD=(python main.py --portfolio --steps "$STEPS" --symbols)
+for sym in $SYMBOLS_INPUT; do
+    CMD+=("$sym")
+done
 
-[ -n "$SYMBOLS_INPUT" ]          && CMD="$CMD --symbols $SYMBOLS_INPUT"
-[[ "$REFRESH"   =~ ^[Yy]$ ]]    && CMD="$CMD --refresh"
-[[ "$SENTIMENT" =~ ^[Yy]$ ]]    && CMD="$CMD --sentiment"
+[[ "$REFRESH"   =~ ^[Yy]$ ]] && CMD+=(--refresh)
+[[ "$SENTIMENT" =~ ^[Yy]$ ]] && CMD+=(--sentiment)
 
-echo "==> Running: $CMD"
+printf "==> Running:"
+printf " %q" "${CMD[@]}"
 echo ""
-eval "$CMD"
+echo ""
+"${CMD[@]}"
 
 echo ""
 echo "==> Done! Charts saved to ./plot/"
