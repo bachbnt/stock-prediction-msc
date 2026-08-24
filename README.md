@@ -62,7 +62,7 @@ stock-prediction-msc/
 │   └── install-python.sh   # Install pyenv + Python 3.13
 │
 ├── data/                    # CSV price data (auto-updated via vnstock)
-├── models/                  # Saved trained models (.keras)
+├── models/                  # Versioned models, scaler, and metadata
 └── plot/                    # Output charts (.png)
 ```
 
@@ -127,6 +127,12 @@ python main.py --sentiment --sentiment-model models/phobert_sentiment
 # Combine flags
 python main.py --refresh --steps 10 --portfolio --sentiment
 ```
+
+Each training configuration is stored separately under
+`models/<symbol>/w<window>_s<steps>_f<features>_<hash>/`. The directory contains
+the three `.keras` models, `scaler.joblib`, and `metadata.json` with the feature
+order, split date, training date range, and validation losses. Legacy model
+files without metadata are left untouched and are not loaded by `--plot-only`.
 
 ---
 

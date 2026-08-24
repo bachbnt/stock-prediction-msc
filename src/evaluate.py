@@ -2,7 +2,8 @@
 import math
 import numpy as np
 
-from config import TAX_BUY, TAX_SELL, BROKERAGE_SELL, RISK_FREE_RATE
+from config import (TAX_BUY, TAX_SELL, BROKERAGE_SELL, RISK_FREE_RATE,
+                    INITIAL_CAPITAL)
 
 
 def compute_error_metrics(real: np.ndarray, pred: np.ndarray, label='') -> dict:
@@ -22,9 +23,9 @@ def compute_error_metrics(real: np.ndarray, pred: np.ndarray, label='') -> dict:
 def compute_trading_metrics(real: np.ndarray, pred: np.ndarray, label='') -> dict:
     """
     Long-only trading strategy: buy when model predicts price increase, sell when decrease.
-    Initial capital: 10,000,000 VND. Accounts for buy/sell tax and brokerage fees.
+    Uses INITIAL_CAPITAL from config. Accounts for buy/sell tax and brokerage fees.
     """
-    initial  = 10_000_000
+    initial = INITIAL_CAPITAL
     cash, shares = float(initial), 0.0
     port_vals, daily_rets = [initial], []
 

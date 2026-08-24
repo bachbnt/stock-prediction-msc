@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 from sklearn.preprocessing import MinMaxScaler
 
-from config import FEATURE_COLS, TARGET_COL, CLOSE_IDX, WINDOW_SIZE, DATE_MILESTONE, N_PREDICT_STEPS
+from config import FEATURE_COLS, TARGET_COL, WINDOW_SIZE, DATE_MILESTONE, N_PREDICT_STEPS
 
 
 # ── Original CSV column names (uppercase) → normalized lowercase ──────────────
@@ -239,8 +239,8 @@ def _make_sequences(data: np.ndarray, window: int, target_idx: int,
     - n_steps>1  → y is a vector [t+1, t+2, ..., t+n_steps] (multi-step prediction)
     """
     X, y = [], []
-    # Stop n_steps before the end so there are enough future values for the label
-    max_i = len(data) - n_steps
+    # Include the final valid target window as well.
+    max_i = len(data) - n_steps + 1
     for i in range(window, max_i):
         X.append(data[i - window:i])          # input window of length `window`
         if n_steps == 1:
@@ -253,13 +253,18 @@ def _make_sequences(data: np.ndarray, window: int, target_idx: int,
 def prepare_data(df: pd.DataFrame,
                  date_milestone: str = DATE_MILESTONE,
                  window: int = WINDOW_SIZE,
-                 n_steps: int = None):
+                 n_steps: int = None,
+                 feature_cols=None,
+                 scaler: MinMaxScaler = None):
     """
     Split into train/test sets, fit-and-transform the scaler (on train only),
     and build sliding-window sequences.
 
     Args:
         n_steps: number of future steps to predict (None → use N_PREDICT_STEPS from config).
+        feature_cols: ordered model features (None → use FEATURE_COLS from config).
+        scaler: an already-fitted scaler from a matching model artifact. When
+                omitted, a new scaler is fitted on training data only.
 
     Returns:
         X_train, y_train, X_test, y_test, scaler, df_train, df_test
@@ -268,12 +273,64 @@ def prepare_data(df: pd.DataFrame,
     if n_steps is None:
         n_steps = N_PREDICT_STEPS
 
-    df_train = df[df['date'] < date_milestone].copy()
-    df_test  = df[df['date'] >= date_milestone].copy()
+    feature_cols = list(FEATURE_COLS if feature_cols is None else feature_cols)
+    if not isinstance(window, int) or isinstance(window, bool) or window < 1:
+        raise ValueError(f"window must be a positive integer, got {window!r}")
+    if not isinstance(n_steps, int) or isinstance(n_steps, bool) or n_steps < 1:
+        raise ValueError(f"n_steps must be a positive integer, got {n_steps!r}")
+    if not feature_cols:
+        raise ValueError("feature_cols cannot be empty")
+    if len(feature_cols) != len(set(feature_cols)):
+        raise ValueError("feature_cols contains duplicate column names")
+    if TARGET_COL not in feature_cols:
+        raise ValueError(f"Target column '{TARGET_COL}' must be present in feature_cols")
+    if df is None or df.empty:
+        raise ValueError("Cannot prepare data from an empty DataFrame")
+
+    required_cols = ['date', *feature_cols]
+    missing_cols = [col for col in required_cols if col not in df.columns]
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {', '.join(missing_cols)}")
+
+    df = df.copy()
+    df['date'] = pd.to_datetime(df['date'], errors='raise')
+    feature_values = df[feature_cols].to_numpy(dtype=float)
+    if not np.isfinite(feature_values).all():
+        bad_cols = [col for col in feature_cols
+                    if not np.isfinite(df[col].to_numpy(dtype=float)).all()]
+        raise ValueError(f"Features contain NaN or infinite values: {', '.join(bad_cols)}")
+
+    split_date = pd.Timestamp(date_milestone)
+    df_train = df[df['date'] < split_date].copy()
+    df_test  = df[df['date'] >= split_date].copy()
+
+    if df_train.empty:
+        raise ValueError(f"Training split is empty before {split_date.date()}")
+    if df_test.empty:
+        raise ValueError(f"Test split is empty on or after {split_date.date()}")
+    min_train_rows = window + n_steps
+    if len(df_train) < min_train_rows:
+        raise ValueError(
+            f"Training split has {len(df_train)} rows; at least {min_train_rows} "
+            f"are required for window={window}, n_steps={n_steps}"
+        )
+    if len(df_test) < n_steps:
+        raise ValueError(
+            f"Test split has {len(df_test)} rows; at least {n_steps} "
+            f"are required for n_steps={n_steps}"
+        )
+
+    target_idx = feature_cols.index(TARGET_COL)
 
     # Fit the scaler exclusively on training data to prevent data leakage
-    scaler = MinMaxScaler(feature_range=(0, 1))
-    scaler.fit(df_train[FEATURE_COLS].values)
+    if scaler is None:
+        scaler = MinMaxScaler(feature_range=(0, 1))
+        scaler.fit(df_train[feature_cols].values)
+    elif getattr(scaler, 'n_features_in_', None) != len(feature_cols):
+        raise ValueError(
+            "Artifact scaler feature count does not match the active feature set: "
+            f"{getattr(scaler, 'n_features_in_', 'unknown')} != {len(feature_cols)}"
+        )
 
     # ── Scaler range validation ────────────────────────────────────────────────
     # If test prices fall outside the training price range, the scaler will
@@ -296,8 +353,8 @@ def prepare_data(df: pd.DataFrame,
 
     # Stack train and test arrays, then transform the entire combined set
     # using the train-fitted scaler (test data uses the same scale as training)
-    combined    = np.vstack([df_train[FEATURE_COLS].values,
-                              df_test[FEATURE_COLS].values])
+    combined    = np.vstack([df_train[feature_cols].values,
+                              df_test[feature_cols].values])
     combined_sc = scaler.transform(combined)
 
     n_train  = len(df_train)
@@ -306,23 +363,37 @@ def prepare_data(df: pd.DataFrame,
     # so that the very first test sequence has a full lookback window
     test_sc  = combined_sc[n_train - window:]
 
-    X_train, y_train = _make_sequences(train_sc, window, CLOSE_IDX, n_steps)
-    X_test,  y_test  = _make_sequences(test_sc,  window, CLOSE_IDX, n_steps)
+    X_train, y_train = _make_sequences(train_sc, window, target_idx, n_steps)
+    X_test,  y_test  = _make_sequences(test_sc,  window, target_idx, n_steps)
 
     return X_train, y_train, X_test, y_test, scaler, df_train, df_test
 
 
-def inverse_close(scaled: np.ndarray, scaler: MinMaxScaler) -> np.ndarray:
+def inverse_close(scaled: np.ndarray, scaler: MinMaxScaler,
+                  feature_cols=None) -> np.ndarray:
     """
     Inverse-transform scaled values back to the original price domain for the
-    close-price column (index CLOSE_IDX).
+    close-price column.
     Supports both 1D arrays (single-step) and 2D arrays (multi-step, shape N×n_steps).
     """
-    scaled_flat = np.array(scaled)
+    feature_cols = list(FEATURE_COLS if feature_cols is None else feature_cols)
+    if TARGET_COL not in feature_cols:
+        raise ValueError(f"Target column '{TARGET_COL}' must be present in feature_cols")
+    n_scaler_features = getattr(scaler, 'n_features_in_', None)
+    if n_scaler_features != len(feature_cols):
+        raise ValueError(
+            "Scaler feature count does not match feature_cols: "
+            f"{n_scaler_features} != {len(feature_cols)}"
+        )
+
+    target_idx = feature_cols.index(TARGET_COL)
+    scaled_flat = np.asarray(scaled)
     original_shape = scaled_flat.shape
 
     # Flatten to 1D so we can build a full-feature dummy matrix for inverse_transform
     flat = scaled_flat.flatten()
+    if flat.size == 0:
+        return flat
 
     # Detect out-of-range scaled values — these indicate the scaler is extrapolating
     # and the resulting prices will be incorrect (classic symptom: MAPE > 1000%)
@@ -335,9 +406,9 @@ def inverse_close(scaled: np.ndarray, scaler: MinMaxScaler) -> np.ndarray:
 
     # Build a zero-filled dummy array with the same number of feature columns,
     # then insert the scaled close values at the correct column index
-    dummy = np.zeros((len(flat), len(FEATURE_COLS)))
-    dummy[:, CLOSE_IDX] = flat
-    result = scaler.inverse_transform(dummy)[:, CLOSE_IDX]
+    dummy = np.zeros((len(flat), len(feature_cols)))
+    dummy[:, target_idx] = flat
+    result = scaler.inverse_transform(dummy)[:, target_idx]
 
     # Restore the original 2D shape for multi-step predictions (n_steps > 1)
     # If the last dimension equals 1 (e.g., model.predict output), keep as 1D

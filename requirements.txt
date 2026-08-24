@@ -4,12 +4,13 @@
 # Cài đặt:
 #   pip install -r requirements.txt
 #
-# Apple Silicon (M1/M2/M3) — thêm GPU acceleration sau khi cài tensorflow:
-#   pip install tensorflow-metal
+# Apple Silicon: scripts/setup.sh pins TensorFlow 2.18.x for compatibility.
+# Do not add tensorflow-metal; see the platform note in README.md.
 
 # ── Core ML ───────────────────────────────────────────────────────────────────
 tensorflow>=2.13.0,<3.0.0   # Python 3.10–3.13; chưa hỗ trợ 3.14+
 scikit-learn>=1.3.0
+joblib>=1.3.0
 statsmodels>=0.14.0
 
 # ── Data ──────────────────────────────────────────────────────────────────────

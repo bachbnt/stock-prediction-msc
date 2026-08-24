@@ -11,7 +11,9 @@ import pandas as pd
 import tensorflow as tf
 
 from config import (SYMBOLS, DATE_MILESTONE, WINDOW_SIZE, BATCH_SIZE,
-                    FEATURE_COLS, CLOSE_IDX, SEED, N_PREDICT_STEPS)
+                    FEATURE_COLS, TARGET_COL, SEED, N_PREDICT_STEPS)
+from artifacts   import (artifact_directory, build_artifact_config,
+                         load_artifact_bundle, save_artifact_bundle)
 from data_loader import load_data, update_data, prepare_data, inverse_close
 from features    import add_features
 from models      import build_lstm, build_bilstm, build_cnnlstm, train_model, ensemble_predict
@@ -65,17 +67,39 @@ def run_symbol(symbol: str, save_dir: str = 'plot',
     else:
         print(f"  Features: {len(feature_cols)} | Rows: {len(df)}")
 
-    # 3. Build sliding-window sequences for train/test split
+    artifact_config = build_artifact_config(
+        symbol=symbol,
+        date_milestone=DATE_MILESTONE,
+        window=WINDOW_SIZE,
+        n_steps=n_steps,
+        feature_cols=feature_cols,
+        sentiment_model=(sentiment_model if 'sentiment' in feature_cols else None),
+        seed=SEED,
+        batch_size=BATCH_SIZE,
+    )
+    artifact_dir = artifact_directory(artifact_config)
+    artifact_metadata = artifact_scaler = None
+    if plot_only:
+        artifact_metadata, artifact_scaler, artifact_error = \
+            load_artifact_bundle(artifact_dir, artifact_config)
+        if artifact_error:
+            print(f"  [Artifact] {artifact_error}; models will be trained.")
+        else:
+            print(f"  [Artifact] Loaded config from {artifact_dir}")
+
+    # 3. Build sliding-window sequences for train/test split. A plot-only run
+    # reuses the exact scaler stored with the matching model configuration.
     X_train, y_train, X_test, y_test, scaler, df_train, df_test = \
-        prepare_data(df, DATE_MILESTONE, WINDOW_SIZE, n_steps)
+        prepare_data(df, DATE_MILESTONE, WINDOW_SIZE, n_steps,
+                     feature_cols=feature_cols, scaler=artifact_scaler)
     input_shape = (WINDOW_SIZE, len(feature_cols))
 
     # Use step-1 predictions as ground truth for error metrics and visualization
     if n_steps == 1:
-        real_price = inverse_close(y_test, scaler)
+        real_price = inverse_close(y_test, scaler, feature_cols)
     else:
         # For multi-step output, use the first predicted step as the reference target
-        real_price = inverse_close(y_test[:, 0], scaler)
+        real_price = inverse_close(y_test[:, 0], scaler, feature_cols)
 
     print(f"  Train: {len(X_train)} | Test: {len(X_test)}")
 
@@ -83,39 +107,65 @@ def run_symbol(symbol: str, save_dir: str = 'plot',
     trained_models = {}
 
     # 4. Train or load each deep learning model
-    model_dir = os.path.join('models', symbol)
+    artifact_changed = False
     for name, builder in [
         ('LSTM',     lambda: build_lstm(input_shape, n_steps=n_steps)),
         ('BiLSTM',   lambda: build_bilstm(input_shape, n_steps=n_steps)),
         ('CNN-LSTM', lambda: build_cnnlstm(input_shape, n_steps=n_steps)),
     ]:
-        model_path = os.path.join(model_dir, f'{name}.keras')
-        if plot_only and os.path.exists(model_path):
-            print(f"\n  Loading {name} from {model_path}...")
-            from keras.models import load_model
-            model = load_model(model_path)
-            vl    = 1.0   # placeholder validation loss when loading a saved model
-        else:
+        model_path = os.path.join(artifact_dir, f'{name}.keras')
+        loaded = False
+        saved_losses = (artifact_metadata or {}).get('val_losses', {})
+        if plot_only and name in saved_losses and os.path.exists(model_path):
+            try:
+                print(f"\n  Loading {name} from {model_path}...")
+                from keras.models import load_model
+                model = load_model(model_path)
+                if tuple(model.input_shape[1:]) != input_shape:
+                    raise ValueError(
+                        f"input shape {model.input_shape[1:]} != {input_shape}"
+                    )
+                if model.output_shape[-1] != n_steps:
+                    raise ValueError(
+                        f"output steps {model.output_shape[-1]} != {n_steps}"
+                    )
+                vl = float(saved_losses[name])
+                loaded = True
+            except Exception as exc:
+                print(f"  [Artifact] Cannot load {name}: {exc}; retraining.")
+
+        if not loaded:
             model = builder()
             print(f"\n  Training {name}...")
             vl = train_model(model, X_train, y_train, BATCH_SIZE)
-            os.makedirs(model_dir, exist_ok=True)
+            os.makedirs(artifact_dir, exist_ok=True)
             model.save(model_path)
+            artifact_changed = True
             print(f"  → Saved: {model_path}")
 
         raw_pred = model.predict(X_test, verbose=0)
-        # Always use the first output step — handles the case where a saved
-        # model was trained with a different N_PREDICT_STEPS than the current config
+        # Use step 1 for the common evaluation chart when the model is multi-step.
         if raw_pred.ndim == 2 and raw_pred.shape[1] > 1:
-            pred = inverse_close(raw_pred[:, 0], scaler)
+            pred = inverse_close(raw_pred[:, 0], scaler, feature_cols)
         else:
-            pred = inverse_close(raw_pred, scaler)
+            pred = inverse_close(raw_pred, scaler, feature_cols)
 
         predictions[name]    = pred
         val_losses[name]     = vl
         trained_models[name] = model
         error_metrics[name]  = compute_error_metrics(real_price, pred, name)
         trading[name]        = compute_trading_metrics(real_price, pred, name)
+
+    if artifact_changed or artifact_metadata is None:
+        training_data = {
+            'rows': len(df_train),
+            'start': df_train['date'].min().date().isoformat(),
+            'end': df_train['date'].max().date().isoformat(),
+        }
+        save_artifact_bundle(
+            artifact_dir, artifact_config, scaler, val_losses, training_data
+        )
+        print(f"  [Artifact] Saved scaler and metadata to {artifact_dir}")
 
     # 5. ARIMA baseline (walk-forward validation — re-fits on each new observation)
     from statsmodels.tsa.arima.model import ARIMA
@@ -149,7 +199,7 @@ def run_symbol(symbol: str, save_dir: str = 'plot',
     # horizon = n_steps so --steps also controls the forecast length.
     future_prices = _forecast_future(
         trained_models, ens_weights, df, scaler, n_steps, WINDOW_SIZE,
-        horizon=n_steps
+        horizon=n_steps, feature_cols=feature_cols
     )
 
     # 8. Generate and save visualization
@@ -179,7 +229,8 @@ def run_symbol(symbol: str, save_dir: str = 'plot',
 
 def _forecast_future(trained_models: dict, ens_weights: dict,
                      df: pd.DataFrame, scaler, n_steps: int,
-                     window: int, horizon: int = 1) -> dict:
+                     window: int, horizon: int = 1,
+                     feature_cols=None) -> dict:
     """
     Forecast the next `horizon` trading days using an iterative / auto-regressive
     approach for single-step models (n_steps=1), or a single forward pass for
@@ -194,28 +245,31 @@ def _forecast_future(trained_models: dict, ens_weights: dict,
     Args:
         horizon: number of future trading days to forecast (default 1).
     """
-    from config import FEATURE_COLS
     try:
+        feature_cols = list(FEATURE_COLS if feature_cols is None else feature_cols)
+        target_idx = feature_cols.index(TARGET_COL)
         future = {}
 
         for name, model in trained_models.items():
             if n_steps > 1:
                 # Multi-step: single forward pass returns `n_steps` values
-                last_window = df[FEATURE_COLS].values[-window:]
+                last_window = df[feature_cols].values[-window:]
                 last_scaled = scaler.transform(last_window)
-                X = last_scaled.reshape(1, window, len(FEATURE_COLS))
+                X = last_scaled.reshape(1, window, len(feature_cols))
                 raw = model.predict(X, verbose=0)
-                future[name] = inverse_close(raw, scaler).flatten()[:horizon]
+                future[name] = inverse_close(
+                    raw, scaler, feature_cols
+                ).flatten()[:horizon]
             else:
                 # Single-step: iterative / auto-regressive forecast
                 # Start with a copy of the last `window` rows (scaled)
                 window_scaled = scaler.transform(
-                    df[FEATURE_COLS].values[-window:]
+                    df[feature_cols].values[-window:]
                 ).copy()   # shape: (window, n_features)
 
                 preds = []
                 for _ in range(horizon):
-                    X = window_scaled.reshape(1, window, len(FEATURE_COLS))
+                    X = window_scaled.reshape(1, window, len(feature_cols))
                     raw = model.predict(X, verbose=0)          # (1, 1)
                     next_price_scaled = float(raw[0, 0])
                     preds.append(next_price_scaled)
@@ -223,11 +277,13 @@ def _forecast_future(trained_models: dict, ens_weights: dict,
                     # Slide the window forward: drop oldest row, append new row.
                     # Copy the last row's features and update only the close column.
                     new_row = window_scaled[-1].copy()
-                    new_row[CLOSE_IDX] = next_price_scaled
+                    new_row[target_idx] = next_price_scaled
                     window_scaled = np.vstack([window_scaled[1:], new_row])
 
                 # Convert scaled predictions back to price domain all at once
-                future[name] = inverse_close(np.array(preds), scaler)
+                future[name] = inverse_close(
+                    np.array(preds), scaler, feature_cols
+                )
 
         # Ensemble: weighted average of individual model forecasts
         ens = sum(ens_weights[k] * future[k]
@@ -360,6 +416,8 @@ Examples:
             try:
                 result = run_symbol(symbol, save_dir=args.save_dir,
                                     refresh=False, n_steps=args.steps,
+                                    use_sentiment=args.sentiment,
+                                    sentiment_model=args.sentiment_model,
                                     plot_only=True)
                 all_results.append(result)
             except Exception as e:
@@ -401,11 +459,6 @@ Examples:
 
     if all_results:
         print_summary(all_results)
-
-        if args.portfolio:
-            run_portfolio(all_results, args.save_dir)
-
-        print(f"\nDone! Plots → ./{args.save_dir}/")
 
         if args.portfolio:
             run_portfolio(all_results, args.save_dir)
