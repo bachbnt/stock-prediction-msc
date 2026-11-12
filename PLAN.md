@@ -25,7 +25,35 @@ python main.py --sentiment              # thêm sentiment feature
 
 ---
 
-## Hướng mở rộng tiếp theo
+## Cập nhật: đã triển khai trong `research.py`
+
+| Hạng mục | Trạng thái | Vị trí |
+|---|---|---|
+| Baseline Naive / Drift / ARIMA / HistGB | ✅ | `src/models_research.py` |
+| Dự đoán log-return, feature dừng (stationary) | ✅ | `src/stationary.py` |
+| Walk-forward validation (5 fold theo năm) | ✅ | `src/research_data.py`, `research_pipeline.py` |
+| Nhiều seed, báo cáo mean ± std | ✅ | `--seeds` |
+| Diebold-Mariano, binomial test DA, OOS R² | ✅ | `src/stats_tests.py` |
+| Ablation theo nhóm feature | ✅ | `--ablation` |
+| Backtest thực tế (ngưỡng chi phí, T+2, biên ±7%, position sizing) | ✅ | `evaluate.backtest_edge` |
+| Xác suất: MC-dropout, quantile, TFT-lite, classifier hướng đi | ✅ | `models_research.py` |
+| GRU, TCN, Transformer, gradient boosting | ✅ | `models_research.py` |
+| Feature VN-Index/beta, ATR, OBV, macro (USD/VND, vàng, dầu) | ✅ | `stationary.py`, `macro_features.py` |
+| Regime (Gaussian mixture, thay HMM) | ✅ | `src/regime.py` |
+| Hyper-parameter tuning (Optuna) | ✅ | `--tune`, `src/tuning.py` |
+| RL trading (fitted Q-iteration) | ✅ (bản nhẹ) | `--rl`, `src/rl_trading.py` |
+| Black-Litterman, Risk Parity, rebalance có phí | ✅ | `portfolio.py`, `portfolio_backtest.py` |
+| Mô hình gộp nhiều mã (pooled) | ✅ | `--pooled` |
+| Đủ 8 mã + sửa dữ liệu lệch điều chỉnh giá | ✅ | `data_repair.py` |
+| Test chống rò rỉ dữ liệu | ✅ | `tests/test_research.py` |
+| Báo cáo tự động (bảng + hình + REPORT.md) | ✅ | `--report` |
+| Fine-tune PhoBERT | ⏳ cần nhãn thủ công | `src/sentiment/labeling.py` |
+| Foreign net flow, SJC, lãi suất liên ngân hàng | ❌ không có API miễn phí ổn định | `macro_features.py` (điểm cắm) |
+| TFT chính thức (pytorch-forecasting), stable-baselines3 | ❌ thay bằng TFT-lite / fitted-Q (không thêm dependency nặng) | — |
+
+---
+
+## Hướng mở rộng tiếp theo (kế hoạch gốc)
 
 ---
 

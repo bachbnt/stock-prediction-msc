@@ -17,11 +17,22 @@ from artifacts   import (artifact_directory, build_artifact_config,
 from data_loader import load_data, update_data, prepare_data, inverse_close
 from features    import add_features
 from models      import build_lstm, build_bilstm, build_cnnlstm, train_model, ensemble_predict
-from evaluate    import compute_error_metrics, compute_trading_metrics
+from evaluate    import compute_error_metrics, compute_trading_metrics, backtest_edge
 from visualize   import plot_symbol
 
 np.random.seed(SEED)
 tf.random.set_seed(SEED)
+
+
+def _trading(real: np.ndarray, pred: np.ndarray, label: str) -> dict:
+    """
+    Realistic edge-based backtest (see evaluate.backtest_edge): the signal is the
+    predicted return for tomorrow versus TODAY's actual close (not versus the
+    previous prediction), trades need to clear the 0.40% round-trip cost, T+2
+    settlement applies and forecasts are clipped to the HOSE +/-7% band.
+    """
+    exp_ret = pred[1:] / real[:-1] - 1.0
+    return backtest_edge(real, exp_ret, mode='binary', label=label)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -154,7 +165,7 @@ def run_symbol(symbol: str, save_dir: str = 'plot',
         val_losses[name]     = vl
         trained_models[name] = model
         error_metrics[name]  = compute_error_metrics(real_price, pred, name)
-        trading[name]        = compute_trading_metrics(real_price, pred, name)
+        trading[name]        = _trading(real_price, pred, name)
 
     if artifact_changed or artifact_metadata is None:
         training_data = {
@@ -185,7 +196,14 @@ def run_symbol(symbol: str, save_dir: str = 'plot',
     predictions['ARIMA']   = pred_arima
     val_losses['ARIMA']    = arima_proxy_loss
     error_metrics['ARIMA'] = compute_error_metrics(real_price, pred_arima, 'ARIMA')
-    trading['ARIMA']       = compute_trading_metrics(real_price, pred_arima, 'ARIMA')
+    trading['ARIMA']       = _trading(real_price, pred_arima, 'ARIMA')
+
+    # 5b. Naive (random-walk) baseline: tomorrow's price = today's price. Any model
+    # that cannot beat this has learned nothing beyond price autocorrelation.
+    pred_naive = np.concatenate([[df_train['close'].values[-1]], real_price[:-1]])
+    predictions['Naive']   = pred_naive
+    error_metrics['Naive'] = compute_error_metrics(real_price, pred_naive, 'Naive')
+    trading['Naive']       = _trading(real_price, pred_naive, 'Naive')
 
     # 6. Ensemble: weighted average of the 3 deep learning models
     dl_preds  = {k: predictions[k] for k in ['LSTM', 'BiLSTM', 'CNN-LSTM']}
@@ -193,7 +211,7 @@ def run_symbol(symbol: str, save_dir: str = 'plot',
     pred_ens, ens_weights = ensemble_predict(dl_preds, dl_losses)
     predictions['Ensemble']   = pred_ens
     error_metrics['Ensemble'] = compute_error_metrics(real_price, pred_ens, 'Ensemble')
-    trading['Ensemble']       = compute_trading_metrics(real_price, pred_ens, 'Ensemble')
+    trading['Ensemble']       = _trading(real_price, pred_ens, 'Ensemble')
 
     # 7. Forecast future prices using the last available window.
     # horizon = n_steps so --steps also controls the forecast length.
@@ -325,7 +343,7 @@ def print_summary(all_results: list):
           f"{'Ret%':>8} {'Sharpe':>7} {'MaxDD%':>8} {'B&H%':>7}")
     print(f"  {'-'*65}")
     for r in all_results:
-        for name in ['LSTM', 'BiLSTM', 'CNN-LSTM', 'ARIMA', 'Ensemble']:
+        for name in ['LSTM', 'BiLSTM', 'CNN-LSTM', 'ARIMA', 'Ensemble', 'Naive']:
             em = r['error_metrics'][name]
             td = r['trading'][name]
             print(f"  {r['symbol']:<5} {name:<10} "
@@ -376,7 +394,7 @@ if __name__ == '__main__':
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python main.py                             # run all 5 symbols, single-step
+  python main.py                             # run all 8 symbols, single-step
   python main.py --symbols FPT VCB           # run 2 symbols
   python main.py --refresh                   # update data from vnstock
   python main.py --steps 5                   # forecast next 5 days
@@ -389,6 +407,8 @@ Examples:
                         help='Stock ticker symbols (default: all)')
     parser.add_argument('--refresh', action='store_true',
                         help='Update data from vnstock before training')
+    parser.add_argument('--repair-data', action='store_true',
+                        help='Fix price-adjustment jumps in data/*.csv (backup in data/raw_backup)')
     parser.add_argument('--data-only', action='store_true',
                         help='Only update data, skip model training')
     parser.add_argument('--plot-only', action='store_true',
@@ -425,6 +445,13 @@ Examples:
         if all_results:
             run_portfolio(all_results, args.save_dir)
             print(f"\nDone! Portfolio plot → ./{args.save_dir}/portfolio_optimization.png")
+        exit(0)
+
+    # ── --repair-data: stitch CSVs onto the provider history, then exit ───────
+    if args.repair_data:
+        from data_repair import repair_all
+        print("==> Repairing price history (originals kept in data/raw_backup)...")
+        repair_all(args.symbols)
         exit(0)
 
     # ── --data-only: refresh data then exit ──────────────────────────────────

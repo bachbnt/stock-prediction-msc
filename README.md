@@ -100,7 +100,7 @@ bash scripts/setup.command   # or double-click the file
 ```bash
 source venv/bin/activate
 
-# Run all 5 symbols
+# Run all 8 symbols
 python main.py
 
 # Run specific symbols
@@ -141,7 +141,7 @@ files without metadata are left untouched and are not loaded by `--plot-only`.
 Edit `src/config.py` to change key parameters:
 
 ```python
-SYMBOLS         = ['FPT', 'VCB', 'VIC', 'HPG', 'VNM']
+SYMBOLS         = ['FPT', 'VCB', 'VIC', 'HPG', 'VNM', 'MWG', 'PNJ', 'SSI']
 DATE_MILESTONE  = '2024-01-01'   # train/test split date — keep recent enough
                                  # so scaler covers the current price range
 WINDOW_SIZE     = 60             # lookback window (trading days)
@@ -193,11 +193,77 @@ Without fine-tuning, keyword-based scoring is used as a fallback.
 
 ---
 
+## Research pipeline (`research.py`)
+
+`main.py` is the original single-split demo. `research.py` is the evaluation
+framework for the thesis. It fixes the main weaknesses of a price-level,
+single-split setup:
+
+| Issue in the original setup | What `research.py` does |
+|---|---|
+| Predicts the raw `close` (non-stationary, MinMax-scaled) | Predicts the **next-day log return** from stationary, scale-free features (`src/stationary.py`) |
+| One train/test split | **Expanding-window walk-forward**, one test year per fold (2021–2025) |
+| One run per model | **Multi-seed** (default 3): tables report mean ± std over seeds |
+| No trivial baseline | **Naive** (random walk), Drift, ARIMA, gradient boosting |
+| No significance testing | **Diebold-Mariano** (HLN-corrected), binomial test on directional accuracy, OOS R² vs random walk |
+| Signal = "prediction t+1 > prediction t", no costs | Signal = forecast vs **today's close**, must clear the 0.40% round-trip cost, **T+2 settlement**, ±7% HOSE band, optional volatility-scaled position sizing |
+| Point forecasts only | Probabilistic: **MC-dropout**, **quantile LSTM**, **TFT-lite** (80% intervals, coverage reported) and a direction classifier |
+
+```bash
+python research.py --fast --symbols FPT --models LSTM GRU Naive   # smoke test (~1 min)
+python research.py                          # full grid: 8 symbols x 5 folds x 3 seeds x 14 models
+python research.py --ablation               # drop one feature group at a time
+python research.py --pooled                 # one network trained on all tickers
+python research.py --tune --symbols FPT     # Optuna search (train data only) -> results/tuning/
+python research.py --hparams results/tuning # reuse the tuned parameters
+python research.py --rl                     # fitted-Q-iteration RL trading agent
+python research.py --portfolio              # Markowitz / Black-Litterman / risk parity, with costs
+python research.py --report                 # results/REPORT.md + tables + figures
+```
+
+Runs are cached per `(symbol, experiment)` in `results/` — re-running resumes;
+use `--no-resume` to recompute. A full grid takes hours on CPU; start with
+`--fast` or restrict `--symbols`, `--models`, `--seeds`, `--test-years`.
+
+**Models:** LSTM, BiLSTM, CNN-LSTM, GRU, TCN, Transformer, LSTM-MC, LSTM-Q,
+TFT-lite, LSTM-Dir, Ensemble (inverse-validation-loss weights); baselines Naive,
+Drift, ARIMA(5,1,0) (rolled forward without re-fitting), HistGB.
+*TFT-lite is a Keras approximation of the Temporal Fusion Transformer (variable
+selection + LSTM + causal attention + quantile heads), not the
+`pytorch-forecasting` implementation.*
+
+**Feature groups** (ablation unit): returns, candles, ma, macd, rsi, bollinger,
+volume (incl. OBV), volatility (incl. ATR), market (VN-Index return, beta, relative
+strength), macro (USD/VND, gold, Brent — lagged one day), sentiment, regime
+(3-state Gaussian-mixture posteriors fitted on training rows only).
+
+**Leakage safeguards** (unit-tested in `tests/test_research.py`): features use only
+data up to day *t*; the scaler, regime model and target scale are fitted on
+training rows; training targets end strictly before the test block starts;
+changing test-period data leaves training tensors unchanged.
+
+**Not implemented / limits:** SJC gold, interbank rates and foreign net-flow have
+no stable free API (see `src/macro_features.py` to plug them in). A proper HMM,
+pytorch-forecasting TFT and stable-baselines3 agents are not used — the Gaussian
+mixture, TFT-lite and fitted-Q agent are lightweight stand-ins with no extra
+dependencies. PhoBERT fine-tuning still needs hand-labelled data
+(`python -m sentiment.labeling export FPT 600`).
+
+### Data repair
+
+Old CSVs mixed two price-adjustment bases (e.g. FPT jumped −39% on 2022-06-01) plus
+unadjusted bonus-share gaps. `python main.py --repair-data` stitches the CSVs onto
+the provider history and neutralises any move beyond the ±7% band; originals are
+kept in `data/raw_backup/`. Re-run it after a `--refresh` if new corporate actions
+have occurred.
+
+---
+
 ## Metrics
 
 **Error metrics:** RMSE, MAE, MAPE, Directional Accuracy (DA)
 
-**Trading metrics** (long-only strategy, HOSE fees applied):
+**Trading metrics** (`main.py` now uses the edge-based backtest `evaluate.backtest_edge`: forecast vs today's close, 0.40% cost hurdle, T+2, ±7% band; the legacy rule is kept as `compute_trading_metrics`):
 - Total Return vs Buy & Hold
 - Sharpe Ratio (risk-free rate: 4.5%/year)
 - Max Drawdown & Calmar Ratio

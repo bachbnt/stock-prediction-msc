@@ -294,3 +294,57 @@ def print_portfolio_summary(opt_result: dict, all_results: list):
         print(f"  {lbl:<15} {p['ret']*100:>9.2f} {p['vol']*100:>9.2f} "
               f"{p['sharpe']:>8.2f}  {w_str}")
     print(f"{'═'*65}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Extensions: Black-Litterman and Risk Parity
+# ═══════════════════════════════════════════════════════════════════════════════
+def _long_only_weights(objective, n: int) -> np.ndarray:
+    res = minimize(objective, np.ones(n) / n, method='SLSQP',
+                   bounds=[(0.0, 1.0)] * n,
+                   constraints={'type': 'eq', 'fun': lambda w: np.sum(w) - 1},
+                   options={'ftol': 1e-10, 'maxiter': 500})
+    w = np.clip(res.x, 0, None)
+    return w / w.sum()
+
+
+def min_variance_weights(cov: np.ndarray) -> np.ndarray:
+    return _long_only_weights(lambda w: float(w @ cov @ w), len(cov))
+
+
+def max_utility_weights(mu: np.ndarray, cov: np.ndarray, delta: float = 2.5) -> np.ndarray:
+    """Long-only mean-variance utility  mu'w - delta/2 w'Σw."""
+    return _long_only_weights(lambda w: -(float(mu @ w) - 0.5 * delta * float(w @ cov @ w)), len(mu))
+
+
+def risk_parity_weights(cov: np.ndarray) -> np.ndarray:
+    """Equal risk contribution: each asset contributes the same share of variance."""
+    n = len(cov)
+
+    def obj(w):
+        rc = w * (cov @ w)
+        return float(np.sum((rc - rc.mean()) ** 2)) * 1e4
+    return _long_only_weights(obj, n)
+
+
+def black_litterman_returns(cov: np.ndarray, views: np.ndarray,
+                            market_weights: np.ndarray = None, delta: float = 2.5,
+                            tau: float = 0.05, confidence: float = 0.5) -> np.ndarray:
+    """
+    Black-Litterman posterior expected returns with ABSOLUTE views on every asset.
+
+      prior   π = δ Σ w_mkt                (equilibrium returns)
+      views   q = model forecasts (annualised), one per asset (P = I)
+      Ω       = diag(τΣ) * (1-c)/c         (c = confidence in the model, 0<c<=1)
+      μ_BL    = [(τΣ)^-1 + Ω^-1]^-1 [(τΣ)^-1 π + Ω^-1 q]
+
+    c -> 0 returns the prior, c -> 1 returns the views.
+    """
+    n = len(cov)
+    w_mkt = np.ones(n) / n if market_weights is None else np.asarray(market_weights, float)
+    pi = delta * cov @ w_mkt
+    c = float(np.clip(confidence, 1e-6, 1 - 1e-6))
+    tau_cov = tau * cov
+    omega = np.diag(np.diag(tau_cov) * (1 - c) / c)
+    inv_t, inv_o = np.linalg.inv(tau_cov), np.linalg.inv(omega)
+    return np.linalg.solve(inv_t + inv_o, inv_t @ pi + inv_o @ np.asarray(views, float))
