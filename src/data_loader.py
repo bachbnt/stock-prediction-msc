@@ -125,8 +125,9 @@ def update_data(symbol: str, data_dir: str = 'data') -> pd.DataFrame:
     if os.path.exists(local):
         existing = load_data(symbol, data_dir)
         last_date = existing['date'].max()
-        # Start from the day after the last known date to avoid duplicates
-        start = (last_date + pd.Timedelta(days=1)).strftime('%Y-%m-%d')
+        # Re-fetch the last stored day too: if the previous refresh ran while the market was
+        # still open, that bar is partial. Duplicates are resolved below keeping the NEW row.
+        start = last_date.strftime('%Y-%m-%d')
         print(f"  [{symbol}] Fetching from {start} to today...")
     else:
         existing = None
@@ -136,7 +137,7 @@ def update_data(symbol: str, data_dir: str = 'data') -> pd.DataFrame:
     end = pd.Timestamp.today().strftime('%Y-%m-%d')
 
     # Skip if data is already up-to-date
-    if start >= end:
+    if start > end:
         print(f"  [{symbol}] Data is already up-to-date as of {end}, skipping.")
         return existing
 
@@ -215,7 +216,7 @@ def update_data(symbol: str, data_dir: str = 'data') -> pd.DataFrame:
 
     # Remove duplicate dates and re-sort chronologically
     combined = (combined
-                .drop_duplicates(subset='date')
+                .drop_duplicates(subset='date', keep='last')
                 .sort_values('date')
                 .reset_index(drop=True))
 

@@ -249,6 +249,26 @@ mixture, TFT-lite and fitted-Q agent are lightweight stand-ins with no extra
 dependencies. PhoBERT fine-tuning still needs hand-labelled data
 (`python -m sentiment.labeling export FPT 600`).
 
+### Daily snapshots (foreign flow, breadth, SJC gold, USD/VND)
+
+These endpoints have no history API, so a launchd job records them every trading day
+(`scripts/finhub-snapshot/`, uses the sibling `finhub-mcp` project). It must run from
+`~/Developer/finhub-snapshot` because macOS blocks launchd jobs from `~/Desktop`.
+
+```bash
+scripts/finhub-snapshot/job.sh install    # venv + code + LaunchAgent (Mon-Fri 15:10 / 16:30 / 20:00)
+scripts/finhub-snapshot/job.sh stop       # schedule OFF (stays off at login)   |   job.sh start = ON
+scripts/finhub-snapshot/job.sh status     # agent loaded? rows recorded? log tail
+scripts/finhub-snapshot/job.sh sync       # copy CSVs into data/macro/snapshots/
+scripts/finhub-snapshot/job.sh uninstall  # remove the agent, keep the data
+```
+
+Each command also has a double-click `Finhub Snapshot - <Start|Stop|Status|Run now|Sync to repo|Uninstall>.command` in the same folder.
+
+History starts on the install day, so do not add these as model features until they cover
+several walk-forward folds (`macro_features.load_snapshots()` reads them). A Mac that is
+off at all three times loses that day's snapshot permanently.
+
 ### Data repair
 
 Old CSVs mixed two price-adjustment bases (e.g. FPT jumped −39% on 2022-06-01) plus

@@ -72,3 +72,18 @@ def load_macro(refresh: bool = False) -> pd.DataFrame:
     except Exception as exc:
         print(f"  [macro] yfinance data unavailable ({str(exc)[:60]})")
         return cached
+
+
+def load_snapshots(directory: str = os.path.join(MACRO_DIR, 'snapshots')) -> dict:
+    """
+    Daily end-of-day snapshots recorded by scripts/finhub-snapshot (foreign flow per
+    symbol, HOSE breadth, SJC gold, USD/VND). These endpoints have no history API, so
+    the files only start on the day the job was installed. Returns {} when absent.
+    Do not feed them to the walk-forward until they span several test folds.
+    """
+    out = {}
+    for name in ('vn_foreign_daily', 'vn_breadth_daily', 'macro_daily'):
+        path = os.path.join(directory, f'{name}.csv')
+        if os.path.exists(path):
+            out[name] = pd.read_csv(path, parse_dates=['date'])
+    return out
